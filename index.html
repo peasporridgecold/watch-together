@@ -1,0 +1,533 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+<meta name="theme-color" content="#0f0f13">
+<title>같이보기 🍿 — 유튜브 함께 보기</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Jua&display=swap" rel="stylesheet">
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+  html, body { height: 100%; }
+  body {
+    font-family: 'Jua', sans-serif;
+    background: #0f0f13;
+    color: #f0eef5;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    min-height: 100dvh;
+    padding: env(safe-area-inset-top) env(safe-area-inset-right) env(safe-area-inset-bottom) env(safe-area-inset-left);
+  }
+  .wrap { width: 100%; max-width: 560px; padding: 16px; display: flex; flex-direction: column; gap: 14px; }
+
+  /* ── 헤더 ── */
+  header { display: flex; align-items: center; justify-content: space-between; padding: 4px 2px; }
+  .logo { font-size: 22px; letter-spacing: 1px; }
+  .logo span { color: #ff5d73; }
+  #statusBadge {
+    font-size: 13px; padding: 5px 12px; border-radius: 999px;
+    background: #23232e; color: #9a97ad; transition: all .3s;
+  }
+  #statusBadge.on { background: #173226; color: #5ee8a0; }
+  #statusBadge.err { background: #331a1f; color: #ff8a9a; }
+
+  /* ── 카드 공통 ── */
+  .card {
+    background: #191921; border: 1px solid #26262f; border-radius: 20px;
+    padding: 20px; display: flex; flex-direction: column; gap: 14px;
+  }
+  h2 { font-size: 17px; font-weight: normal; color: #c9c6da; }
+  .hint { font-size: 13px; color: #77748c; line-height: 1.6; }
+
+  button {
+    font-family: 'Jua', sans-serif; font-size: 17px; color: #fff;
+    background: #ff5d73; border: none; border-radius: 14px;
+    padding: 15px 18px; cursor: pointer; transition: transform .08s, opacity .2s;
+  }
+  button:active { transform: scale(.97); }
+  button.ghost { background: #26262f; color: #d5d2e6; }
+  button.small { font-size: 14px; padding: 10px 14px; border-radius: 11px; }
+  button:disabled { opacity: .45; }
+
+  input {
+    font-family: 'Jua', sans-serif; font-size: 16px; color: #f0eef5;
+    background: #101017; border: 1.5px solid #2e2e3a; border-radius: 13px;
+    padding: 13px 15px; width: 100%; outline: none;
+  }
+  input:focus { border-color: #ff5d73; }
+  input::placeholder { color: #55526a; }
+
+  .row { display: flex; gap: 9px; }
+  .row > input { flex: 1; min-width: 0; }
+
+  /* ── 플레이어 ── */
+  #playerBox {
+    position: relative; width: 100%; aspect-ratio: 16/9;
+    background: #000; border-radius: 16px; overflow: hidden;
+    display: none;
+  }
+  #playerBox iframe, #player { position: absolute; inset: 0; width: 100%; height: 100%; }
+  #playerEmpty {
+    position: absolute; inset: 0; display: flex; flex-direction: column;
+    align-items: center; justify-content: center; gap: 8px;
+    color: #55526a; font-size: 15px; background: #14141b; z-index: 1;
+  }
+  #playerEmpty .big { font-size: 40px; }
+  /* 모바일 자동재생 잠금 해제용 오버레이 */
+  #tapOverlay {
+    position: absolute; inset: 0; z-index: 5; display: none;
+    flex-direction: column; align-items: center; justify-content: center; gap: 10px;
+    background: rgba(10,10,16,.82); backdrop-filter: blur(3px);
+    cursor: pointer; text-align: center; padding: 20px;
+  }
+  #tapOverlay .big { font-size: 44px; animation: pulse 1.4s infinite; }
+  #tapOverlay p { font-size: 17px; color: #fff; }
+  #tapOverlay .sub { font-size: 13px; color: #9a97ad; }
+  @keyframes pulse { 0%,100%{transform:scale(1)} 50%{transform:scale(1.15)} }
+
+  /* ── 초대 코드 ── */
+  #codeDisplay {
+    font-size: 34px; letter-spacing: 8px; text-align: center;
+    background: #101017; border: 1.5px dashed #3a3a4a; border-radius: 14px;
+    padding: 14px; color: #ffd166; user-select: all;
+  }
+  .peers { font-size: 14px; color: #9a97ad; text-align: center; }
+  .peers b { color: #5ee8a0; }
+
+  #toast {
+    position: fixed; bottom: 28px; left: 50%; transform: translateX(-50%) translateY(80px);
+    background: #2b2b38; color: #fff; font-size: 14px; padding: 11px 20px;
+    border-radius: 999px; opacity: 0; transition: all .3s; z-index: 50;
+    white-space: nowrap; max-width: 90vw; overflow: hidden; text-overflow: ellipsis;
+  }
+  #toast.show { opacity: 1; transform: translateX(-50%) translateY(0); }
+
+  .screen { display: none; flex-direction: column; gap: 14px; }
+  .screen.active { display: flex; }
+  .landing-emoji { font-size: 56px; text-align: center; margin: 18px 0 4px; }
+  .landing-title { text-align: center; font-size: 24px; line-height: 1.5; }
+  .landing-title small { display: block; font-size: 14px; color: #77748c; margin-top: 6px; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <div class="logo">같이보기 <span>🍿</span></div>
+    <div id="statusBadge">대기 중</div>
+  </header>
+
+  <!-- ══ 첫 화면: 방 만들기 / 참여하기 ══ -->
+  <div id="landing" class="screen active">
+    <div class="landing-emoji">📺</div>
+    <div class="landing-title">유튜브를 함께 봐요!<small>재생 · 일시정지 · 탐색이 실시간으로 똑같이 맞춰져요.<br>통화하면서 같이 보기 딱 좋아요 📞</small></div>
+
+    <div class="card">
+      <h2>🎬 새로운 방 만들기</h2>
+      <button id="btnCreate">방 만들기</button>
+      <div class="hint">방을 만들고 초대 링크를 친구에게 보내주세요.</div>
+    </div>
+
+    <div class="card">
+      <h2>🙋 초대 코드로 참여하기</h2>
+      <div class="row">
+        <input id="joinCode" placeholder="초대 코드 6자리" maxlength="6" autocapitalize="characters" autocomplete="off">
+        <button id="btnJoin" class="small">참여</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- ══ 방 화면 ══ -->
+  <div id="room" class="screen">
+    <div id="playerBox">
+      <div id="playerEmpty"><div class="big">🎥</div><div>아래에 유튜브 링크를 붙여넣어 주세요</div></div>
+      <div id="player"></div>
+      <div id="tapOverlay">
+        <div class="big">👆</div>
+        <p>탭해서 같이 보기 시작!</p>
+        <p class="sub">(휴대폰은 한 번 터치해야 재생이 허용돼요)</p>
+      </div>
+    </div>
+
+    <div class="peers">👥 <b id="peerCount">1</b>명이 함께 보는 중</div>
+
+    <div class="card">
+      <h2>🔗 영상 바꾸기</h2>
+      <div class="row">
+        <input id="videoUrl" placeholder="유튜브 링크 또는 영상 ID 붙여넣기" autocomplete="off">
+        <button id="btnLoad" class="small">재생</button>
+      </div>
+    </div>
+
+    <div class="card" id="inviteCard">
+      <h2>💌 친구 초대하기</h2>
+      <div id="codeDisplay">------</div>
+      <div class="row">
+        <button id="btnCopyLink" class="ghost" style="flex:1">링크 복사</button>
+        <button id="btnShare" style="flex:1">공유하기</button>
+      </div>
+      <div class="hint">친구가 링크를 열면 바로 이 방에 들어와요.</div>
+    </div>
+
+    <button id="btnLeave" class="ghost">방 나가기</button>
+  </div>
+</div>
+
+<div id="toast"></div>
+
+<script src="https://unpkg.com/peerjs@1.5.4/dist/peerjs.min.js"></script>
+<script>
+'use strict';
+
+/* ═══════════════ 상수 & 상태 ═══════════════ */
+const ID_PREFIX = 'ytwatch-kr-v1-';           // PeerJS 방 ID 접두어 (다른 서비스와 충돌 방지)
+const CODE_CHARS = 'ABCDEFGHJKMNPQRSTUVWXYZ23456789'; // 헷갈리는 글자(I,L,O,0,1) 제외
+// 무료 STUN/TURN 서버 — 모바일 통신망(NAT) 뒤에서도 연결되도록
+const PEER_CONFIG = { config: { iceServers: [
+  { urls: 'stun:stun.l.google.com:19302' },
+  { urls: 'stun:stun1.l.google.com:19302' },
+  { urls: 'turn:openrelay.metered.ca:80',  username: 'openrelayproject', credential: 'openrelayproject' },
+  { urls: 'turn:openrelay.metered.ca:443', username: 'openrelayproject', credential: 'openrelayproject' },
+]}};
+
+let peer = null;          // 내 PeerJS 객체
+let hostConn = null;      // (게스트) 방장과의 연결
+let guestConns = [];      // (방장) 게스트들과의 연결 목록
+let isHost = false;
+let roomCode = '';
+
+let player = null;        // 유튜브 플레이어
+let playerReady = false;
+let currentVideoId = '';
+let suppressUntil = 0;    // 원격 명령 적용 중 → 내 이벤트 되돌려보내기(에코) 방지
+let lastPolledTime = 0;   // 일시정지 중 탐색(시크) 감지용
+let userInteracted = false; // 모바일 자동재생 잠금 해제 여부
+let pendingState = null;  // 잠금 해제 전 도착한 재생 상태 (탭하면 적용)
+
+const $ = id => document.getElementById(id);
+
+/* ═══════════════ 작은 도우미들 ═══════════════ */
+function toast(msg) {
+  const t = $('toast');
+  t.textContent = msg;
+  t.classList.add('show');
+  clearTimeout(t._timer);
+  t._timer = setTimeout(() => t.classList.remove('show'), 2600);
+}
+
+function setStatus(text, cls) {
+  const b = $('statusBadge');
+  b.textContent = text;
+  b.className = cls || '';
+}
+
+function genCode() {
+  let c = '';
+  for (let i = 0; i < 6; i++) c += CODE_CHARS[Math.floor(Math.random() * CODE_CHARS.length)];
+  return c;
+}
+
+function roomLink() {
+  return location.origin + location.pathname + '?room=' + roomCode;
+}
+
+// 유튜브 링크에서 영상 ID 뽑아내기 (watch / youtu.be / shorts / live / embed / 순수 ID 모두 지원)
+function parseVideoId(text) {
+  text = (text || '').trim();
+  if (/^[\w-]{11}$/.test(text)) return text;
+  const m = text.match(/(?:youtube\.com\/(?:watch\?(?:.*&)?v=|shorts\/|live\/|embed\/)|youtu\.be\/)([\w-]{11})/);
+  return m ? m[1] : null;
+}
+
+function showScreen(name) {
+  $('landing').classList.toggle('active', name === 'landing');
+  $('room').classList.toggle('active', name === 'room');
+  $('playerBox').style.display = name === 'room' ? 'block' : 'none';
+}
+
+/* ═══════════════ 유튜브 플레이어 ═══════════════ */
+// 유튜브 IFrame API 스크립트 로드
+const ytScript = document.createElement('script');
+ytScript.src = 'https://www.youtube.com/iframe_api';
+document.head.appendChild(ytScript);
+
+window.onYouTubeIframeAPIReady = function() {
+  player = new YT.Player('player', {
+    width: '100%', height: '100%',
+    playerVars: { playsinline: 1, rel: 0, origin: location.origin },
+    events: {
+      onReady: () => { playerReady = true; },
+      onStateChange: onPlayerStateChange,
+    },
+  });
+};
+
+function onPlayerStateChange(e) {
+  if (!currentVideoId) return;
+  // 원격 명령을 적용하는 중이면 다시 방송하지 않음 (무한 에코 방지)
+  if (Date.now() < suppressUntil) return;
+  const t = player.getCurrentTime();
+  if (e.data === YT.PlayerState.PLAYING) {
+    send({ t: 'play', time: t });
+  } else if (e.data === YT.PlayerState.PAUSED) {
+    send({ t: 'pause', time: t });
+  }
+}
+
+function loadVideo(id, broadcast) {
+  currentVideoId = id;
+  $('playerEmpty').style.display = 'none';
+  suppressUntil = Date.now() + 2000;
+  player.loadVideoById(id);
+  if (!userInteracted) showTapOverlay({ videoId: id, time: 0, playing: true });
+  if (broadcast) send({ t: 'video', id });
+}
+
+// 원격에서 온 재생 상태를 실제 플레이어에 적용
+function applyRemoteState(st) {
+  if (!playerReady) { pendingState = st; return; }
+  // 모바일에서 아직 화면을 터치한 적이 없으면 자동재생이 막힘 → 오버레이로 탭 유도
+  if (!userInteracted && st.playing) { showTapOverlay(st); return; }
+
+  suppressUntil = Date.now() + 1800;
+  if (st.videoId && st.videoId !== currentVideoId) {
+    currentVideoId = st.videoId;
+    $('playerEmpty').style.display = 'none';
+    player.loadVideoById(st.videoId, st.time || 0);
+    if (!st.playing) setTimeout(() => { suppressUntil = Date.now() + 1500; player.pauseVideo(); }, 700);
+    return;
+  }
+  if (typeof st.time === 'number' && Math.abs(player.getCurrentTime() - st.time) > 1.2) {
+    player.seekTo(st.time, true);
+  }
+  if (st.playing === true) player.playVideo();
+  if (st.playing === false) player.pauseVideo();
+}
+
+function showTapOverlay(st) {
+  pendingState = st;
+  $('tapOverlay').style.display = 'flex';
+}
+
+$('tapOverlay').addEventListener('click', () => {
+  userInteracted = true;
+  $('tapOverlay').style.display = 'none';
+  if (pendingState) { const st = pendingState; pendingState = null; applyRemoteState(st); }
+});
+
+// 첫 터치/클릭이 있으면 자동재생 잠금이 풀린 것으로 간주
+document.addEventListener('pointerdown', () => { userInteracted = true; }, { once: true });
+
+/* ── 0.5초마다: 일시정지 중 탐색 감지 ── */
+setInterval(() => {
+  if (!playerReady || !currentVideoId) return;
+  const state = player.getPlayerState();
+  const t = player.getCurrentTime();
+  if (state === YT.PlayerState.PAUSED && Math.abs(t - lastPolledTime) > 0.8 && Date.now() >= suppressUntil) {
+    send({ t: 'seek', time: t });
+  }
+  lastPolledTime = t;
+}, 500);
+
+/* ── 3초마다: 방장이 현재 상태 방송 (늦게 온 사람/미세한 어긋남 보정) ── */
+setInterval(() => {
+  if (!isHost || !playerReady || !currentVideoId || guestConns.length === 0) return;
+  send({
+    t: 'sync',
+    videoId: currentVideoId,
+    time: player.getCurrentTime(),
+    playing: player.getPlayerState() === YT.PlayerState.PLAYING,
+  });
+}, 3000);
+
+/* ═══════════════ 연결 (PeerJS) ═══════════════ */
+function send(msg) {
+  if (isHost) {
+    guestConns.forEach(c => { if (c.open) c.send(msg); });
+  } else if (hostConn && hostConn.open) {
+    hostConn.send(msg);
+  }
+}
+
+// 받은 메시지 처리 (방장은 다른 게스트에게 중계도 함)
+function handleMessage(msg, fromConn) {
+  if (isHost && fromConn) {
+    guestConns.forEach(c => { if (c !== fromConn && c.open) c.send(msg); });
+  }
+  switch (msg.t) {
+    case 'video':
+      currentVideoId = msg.id;
+      $('playerEmpty').style.display = 'none';
+      applyRemoteState({ videoId: msg.id, time: 0, playing: true });
+      toast('영상이 바뀌었어요 🎬');
+      break;
+    case 'play':  applyRemoteState({ time: msg.time, playing: true }); break;
+    case 'pause': applyRemoteState({ time: msg.time, playing: false }); break;
+    case 'seek':  applyRemoteState({ time: msg.time }); break;
+    case 'sync': { // 방장의 주기적 상태 방송 (게스트만 받음)
+      if (isHost || !playerReady) break;
+      if (msg.videoId !== currentVideoId) { applyRemoteState({ videoId: msg.videoId, time: msg.time, playing: msg.playing }); break; }
+      const myPlaying = player.getPlayerState() === YT.PlayerState.PLAYING;
+      if (msg.playing !== myPlaying) { applyRemoteState({ time: msg.time, playing: msg.playing }); break; }
+      if (msg.playing && Math.abs(player.getCurrentTime() - msg.time) > 1.5) {
+        suppressUntil = Date.now() + 1500;
+        player.seekTo(msg.time, true);
+      }
+      break;
+    }
+    case 'peers':
+      $('peerCount').textContent = msg.n;
+      break;
+  }
+}
+
+function updatePeerCount() {
+  const n = 1 + guestConns.filter(c => c.open).length;
+  $('peerCount').textContent = n;
+  send({ t: 'peers', n });
+}
+
+/* ── 방 만들기 (방장) ── */
+function createRoom() {
+  roomCode = genCode();
+  setStatus('방 여는 중…');
+  peer = new Peer(ID_PREFIX + roomCode.toLowerCase(), PEER_CONFIG);
+
+  peer.on('open', () => {
+    isHost = true;
+    $('codeDisplay').textContent = roomCode;
+    showScreen('room');
+    setStatus('연결됨 · 방장', 'on');
+    history.replaceState(null, '', '?room=' + roomCode);
+    toast('방이 만들어졌어요! 친구를 초대해 보세요 💌');
+  });
+
+  peer.on('connection', conn => {
+    guestConns.push(conn);
+    conn.on('open', () => {
+      toast('친구가 들어왔어요! 👋');
+      updatePeerCount();
+      // 새로 들어온 친구에게 현재 상태 알려주기
+      if (currentVideoId && playerReady) {
+        conn.send({
+          t: 'sync',
+          videoId: currentVideoId,
+          time: player.getCurrentTime(),
+          playing: player.getPlayerState() === YT.PlayerState.PLAYING,
+        });
+      }
+    });
+    conn.on('data', msg => handleMessage(msg, conn));
+    const drop = () => {
+      guestConns = guestConns.filter(c => c !== conn);
+      updatePeerCount();
+      toast('친구가 나갔어요 👋');
+    };
+    conn.on('close', drop);
+    conn.on('error', drop);
+  });
+
+  peer.on('error', err => {
+    if (err.type === 'unavailable-id') {
+      // 코드가 우연히 겹침 → 새 코드로 재시도
+      peer.destroy(); createRoom();
+    } else {
+      setStatus('연결 오류', 'err');
+      toast('연결에 문제가 생겼어요: ' + err.type);
+    }
+  });
+
+  peer.on('disconnected', () => { setStatus('재연결 중…', 'err'); peer.reconnect(); });
+}
+
+/* ── 방 참여하기 (게스트) ── */
+function joinRoom(code) {
+  roomCode = code.toUpperCase();
+  setStatus('참여하는 중…');
+  peer = new Peer(PEER_CONFIG);
+
+  peer.on('open', () => {
+    hostConn = peer.connect(ID_PREFIX + roomCode.toLowerCase(), { reliable: true });
+
+    const failTimer = setTimeout(() => {
+      if (!hostConn.open) { setStatus('연결 실패', 'err'); toast('방을 찾지 못했어요. 코드를 확인해 주세요 🥲'); }
+    }, 12000);
+
+    hostConn.on('open', () => {
+      clearTimeout(failTimer);
+      isHost = false;
+      $('codeDisplay').textContent = roomCode;
+      showScreen('room');
+      setStatus('연결됨', 'on');
+      history.replaceState(null, '', '?room=' + roomCode);
+      toast('방에 들어왔어요! 🎉');
+    });
+    hostConn.on('data', msg => handleMessage(msg, null));
+    hostConn.on('close', () => {
+      setStatus('방장 연결 끊김', 'err');
+      toast('방장과 연결이 끊겼어요 🥲');
+    });
+  });
+
+  peer.on('error', err => {
+    if (err.type === 'peer-unavailable') {
+      setStatus('방 없음', 'err');
+      toast('그 코드의 방이 없어요. 코드를 다시 확인해 주세요!');
+    } else {
+      setStatus('연결 오류', 'err');
+      toast('연결에 문제가 생겼어요: ' + err.type);
+    }
+  });
+
+  peer.on('disconnected', () => peer.reconnect());
+}
+
+/* ═══════════════ 버튼 & 시작 ═══════════════ */
+$('btnCreate').addEventListener('click', createRoom);
+
+$('btnJoin').addEventListener('click', () => {
+  const code = $('joinCode').value.trim();
+  if (code.length !== 6) { toast('초대 코드 6자리를 입력해 주세요'); return; }
+  joinRoom(code);
+});
+$('joinCode').addEventListener('keydown', e => { if (e.key === 'Enter') $('btnJoin').click(); });
+
+$('btnLoad').addEventListener('click', () => {
+  const id = parseVideoId($('videoUrl').value);
+  if (!id) { toast('유튜브 링크가 아닌 것 같아요 🤔'); return; }
+  $('videoUrl').value = '';
+  $('videoUrl').blur();
+  loadVideo(id, true);
+});
+$('videoUrl').addEventListener('keydown', e => { if (e.key === 'Enter') $('btnLoad').click(); });
+
+$('btnCopyLink').addEventListener('click', async () => {
+  try {
+    await navigator.clipboard.writeText(roomLink());
+    toast('초대 링크를 복사했어요! 📋');
+  } catch {
+    prompt('아래 링크를 복사해 주세요', roomLink());
+  }
+});
+
+$('btnShare').addEventListener('click', async () => {
+  const data = { title: '같이보기 🍿', text: '유튜브 같이 봐요! 초대 코드: ' + roomCode, url: roomLink() };
+  if (navigator.share) { try { await navigator.share(data); } catch {} }
+  else $('btnCopyLink').click();
+});
+
+$('btnLeave').addEventListener('click', () => {
+  if (!confirm('방을 나갈까요?')) return;
+  location.href = location.pathname; // 깔끔하게 초기화
+});
+
+// 링크에 ?room=코드 가 있으면 자동 참여
+const urlRoom = new URLSearchParams(location.search).get('room');
+if (urlRoom && urlRoom.length === 6) {
+  $('joinCode').value = urlRoom.toUpperCase();
+  joinRoom(urlRoom);
+}
+</script>
+</body>
+</html>
