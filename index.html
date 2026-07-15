@@ -522,6 +522,9 @@ $('btnLeave').addEventListener('click', () => {
   location.href = location.pathname; // 깔끔하게 초기화
 });
 
+// 창을 닫거나 나갈 때 연결을 곱게 정리 → 상대방 인원수가 바로 갱신됨
+window.addEventListener('pagehide', () => { try { if (peer) peer.destroy(); } catch {} });
+
 // (테스트/문제해결용) 콘솔에서 현재 상태 확인
 window.__debug = () => ({
   videoId: currentVideoId, isHost, code: roomCode,
