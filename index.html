@@ -522,6 +522,15 @@ $('btnLeave').addEventListener('click', () => {
   location.href = location.pathname; // 깔끔하게 초기화
 });
 
+// (테스트/문제해결용) 콘솔에서 현재 상태 확인
+window.__debug = () => ({
+  videoId: currentVideoId, isHost, code: roomCode,
+  playing: playerReady && player.getPlayerState() === 1,
+  time: playerReady ? player.getCurrentTime() : 0,
+  peers: Number($('peerCount').textContent),
+  play: () => player.playVideo(), pause: () => player.pauseVideo(), seek: t => player.seekTo(t, true),
+});
+
 // 링크에 ?room=코드 가 있으면 자동 참여
 const urlRoom = new URLSearchParams(location.search).get('room');
 if (urlRoom && urlRoom.length === 6) {
