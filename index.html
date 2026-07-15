@@ -257,7 +257,11 @@ window.onYouTubeIframeAPIReady = function() {
     width: '100%', height: '100%',
     playerVars: { playsinline: 1, rel: 0, origin: location.origin },
     events: {
-      onReady: () => { playerReady = true; },
+      onReady: () => {
+        playerReady = true;
+        // 플레이어 준비 전에 도착해 보관해 둔 상태가 있으면 바로 적용
+        if (pendingState) { const st = pendingState; pendingState = null; applyRemoteState(st); }
+      },
       onStateChange: onPlayerStateChange,
     },
   });
