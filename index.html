@@ -269,9 +269,9 @@ function onPlayerStateChange(e) {
   if (Date.now() < suppressUntil) return;
   const t = player.getCurrentTime();
   if (e.data === YT.PlayerState.PLAYING) {
-    send({ t: 'play', time: t });
+    send({ t: 'play', time: t, videoId: currentVideoId });
   } else if (e.data === YT.PlayerState.PAUSED) {
-    send({ t: 'pause', time: t });
+    send({ t: 'pause', time: t, videoId: currentVideoId });
   }
 }
 
@@ -325,7 +325,7 @@ setInterval(() => {
   const state = player.getPlayerState();
   const t = player.getCurrentTime();
   if (state === YT.PlayerState.PAUSED && Math.abs(t - lastPolledTime) > 0.8 && Date.now() >= suppressUntil) {
-    send({ t: 'seek', time: t });
+    send({ t: 'seek', time: t, videoId: currentVideoId });
   }
   lastPolledTime = t;
 }, 500);
@@ -357,14 +357,14 @@ function handleMessage(msg, fromConn) {
   }
   switch (msg.t) {
     case 'video':
-      currentVideoId = msg.id;
-      $('playerEmpty').style.display = 'none';
+      // 주의: 여기서 currentVideoId를 미리 바꾸면 applyRemoteState가
+      // "이미 로드됨"으로 착각해서 실제 로드를 건너뜀 → 반드시 위임만 한다
       applyRemoteState({ videoId: msg.id, time: 0, playing: true });
       toast('영상이 바뀌었어요 🎬');
       break;
-    case 'play':  applyRemoteState({ time: msg.time, playing: true }); break;
-    case 'pause': applyRemoteState({ time: msg.time, playing: false }); break;
-    case 'seek':  applyRemoteState({ time: msg.time }); break;
+    case 'play':  applyRemoteState({ videoId: msg.videoId, time: msg.time, playing: true }); break;
+    case 'pause': applyRemoteState({ videoId: msg.videoId, time: msg.time, playing: false }); break;
+    case 'seek':  applyRemoteState({ videoId: msg.videoId, time: msg.time }); break;
     case 'sync': { // 방장의 주기적 상태 방송 (게스트만 받음)
       if (isHost || !playerReady) break;
       if (msg.videoId !== currentVideoId) { applyRemoteState({ videoId: msg.videoId, time: msg.time, playing: msg.playing }); break; }
