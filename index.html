@@ -138,7 +138,7 @@
   <!-- ══ 첫 화면: 방 만들기 / 참여하기 ══ -->
   <div id="landing" class="screen active">
     <div class="landing-emoji">📺</div>
-    <div class="landing-title">유튜브를 함께 봐요!<small>재생 · 일시정지 · 탐색이 실시간으로 똑같이 맞춰져요.<br>통화하면서 같이 보기 딱 좋아요 📞</small></div>
+    <div class="landing-title">유튜브를 함께 봐요!<small>재생 · 일시정지 · 탐색이 실시간으로 똑같이 맞춰지고,<br>음성 대화도 앱 안에서 바로 할 수 있어요 🎙</small></div>
 
     <div class="card">
       <h2>🎬 새로운 방 만들기</h2>
@@ -168,6 +168,16 @@
     </div>
 
     <div class="peers">👥 <b id="peerCount">1</b>명이 함께 보는 중</div>
+
+    <div class="card">
+      <h2>🎙 음성 대화</h2>
+      <div class="row">
+        <button id="btnVoice" style="flex:1">음성 대화 시작</button>
+        <button id="btnMute" class="ghost small" style="display:none">음소거</button>
+      </div>
+      <div class="hint" id="voiceHint">전화 앱으로 통화하면 폰이 유튜브 소리를 막아요. 대신 여기서 바로 대화하면 영상 소리와 목소리가 같이 들려요!</div>
+    </div>
+    <div id="voiceAudios" style="display:none"></div>
 
     <div class="card">
       <h2>🔍 영상 찾기</h2>
@@ -401,6 +411,19 @@ function handleMessage(msg, fromConn) {
     case 'peers':
       $('peerCount').textContent = msg.n;
       break;
+    case 'voice-on': {
+      const wasKnown = voiceSet.has(msg.id);
+      voiceSet.add(msg.id);
+      if (myStream) {
+        // 새로 켠 사람은 내가 켜져 있는 걸 모를 수 있으니 한 번 더 알림 (중복 방지: 처음 볼 때만)
+        if (!wasKnown) send({ t: 'voice-on', id: myPeerId() });
+        maybeCall(msg.id);
+      }
+      break;
+    }
+    case 'voice-off':
+      handleVoiceOff(msg.id);
+      break;
   }
 }
 
@@ -444,6 +467,9 @@ function createRoom() {
     const drop = () => {
       guestConns = guestConns.filter(c => c !== conn);
       updatePeerCount();
+      // 나간 친구의 음성 정리 + 다른 게스트들에게도 알림
+      handleVoiceOff(conn.peer);
+      send({ t: 'voice-off', id: conn.peer });
       toast('친구가 나갔어요 👋');
     };
     conn.on('close', drop);
@@ -460,6 +486,7 @@ function createRoom() {
     }
   });
 
+  peer.on('call', onIncomingCall);
   peer.on('disconnected', () => { setStatus('재연결 중…', 'err'); peer.reconnect(); });
 }
 
@@ -502,8 +529,119 @@ function joinRoom(code) {
     }
   });
 
+  peer.on('call', onIncomingCall);
   peer.on('disconnected', () => peer.reconnect());
 }
+
+/* ═══════════════ 음성 대화 (WebRTC 오디오) ═══════════════ */
+// 전화/카톡 통화 중엔 OS가 미디어 소리를 막으므로, 통화 자체를 이 앱 안에서 한다.
+// 브라우저는 영상 소리 + 상대 목소리를 같이 섞어 주고, 에코 제거도 해 준다.
+let myStream = null;        // 내 마이크 스트림
+let micMuted = false;
+const voiceSet = new Set(); // 음성을 켠 다른 참여자들의 peer id
+const voiceCalls = {};      // peerId → PeerJS MediaConnection
+
+function myPeerId() { return peer ? peer.id : ''; }
+
+async function startVoice() {
+  try {
+    myStream = await navigator.mediaDevices.getUserMedia({
+      audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true },
+    });
+  } catch {
+    toast('마이크 권한이 필요해요 🎙 브라우저 설정에서 허용해 주세요');
+    return;
+  }
+  $('btnVoice').textContent = '음성 대화 종료';
+  $('btnMute').style.display = '';
+  send({ t: 'voice-on', id: myPeerId() });
+  voiceSet.forEach(id => maybeCall(id)); // 이미 켜져 있던 사람들과 연결
+  updateVoiceUI();
+  toast('음성 대화를 켰어요 🎙');
+}
+
+function stopVoice() {
+  send({ t: 'voice-off', id: myPeerId() });
+  Object.values(voiceCalls).forEach(c => { try { c.close(); } catch {} });
+  for (const k in voiceCalls) delete voiceCalls[k];
+  $('voiceAudios').innerHTML = '';
+  if (myStream) myStream.getTracks().forEach(tr => tr.stop());
+  myStream = null;
+  micMuted = false;
+  $('btnVoice').textContent = '음성 대화 시작';
+  $('btnMute').style.display = 'none';
+  $('btnMute').textContent = '음소거';
+  updateVoiceUI();
+}
+
+// 양쪽이 동시에 걸어 중복되지 않도록, peer id가 큰 쪽이 전화를 거는 규칙
+function maybeCall(id) {
+  if (!myStream || !peer || voiceCalls[id] || id === myPeerId()) return;
+  if (myPeerId() > id) wireCall(peer.call(id, myStream));
+}
+
+function wireCall(call) {
+  if (!call) return;
+  voiceCalls[call.peer] = call;
+  call.on('stream', st => attachAudio(call.peer, st));
+  const cleanup = () => {
+    delete voiceCalls[call.peer];
+    const a = document.getElementById('au-' + call.peer);
+    if (a) a.remove();
+    updateVoiceUI();
+  };
+  call.on('close', cleanup);
+  call.on('error', cleanup);
+  updateVoiceUI();
+}
+
+// 걸려온 음성 연결 받기 (내 마이크가 꺼져 있어도 듣기만은 가능)
+function onIncomingCall(call) {
+  call.answer(myStream || undefined);
+  wireCall(call);
+}
+
+function attachAudio(id, stream) {
+  let a = document.getElementById('au-' + id);
+  if (!a) {
+    a = document.createElement('audio');
+    a.id = 'au-' + id;
+    a.autoplay = true;
+    a.setAttribute('playsinline', '');
+    $('voiceAudios').appendChild(a);
+  }
+  a.srcObject = stream;
+  // 모바일에서 자동재생이 막히면 탭 한 번으로 풀리게
+  a.play().catch(() => toast('화면을 한 번 탭하면 친구 목소리가 들려요 👆'));
+  updateVoiceUI();
+}
+document.addEventListener('pointerdown', () => {
+  document.querySelectorAll('#voiceAudios audio').forEach(a => a.play().catch(() => {}));
+});
+
+function updateVoiceUI() {
+  const n = Object.keys(voiceCalls).length;
+  $('voiceHint').textContent = myStream
+    ? (n > 0 ? `🔊 ${n + 1}명이 대화 중이에요` : '상대방이 "음성 대화 시작"을 누르면 연결돼요')
+    : '전화 앱으로 통화하면 폰이 유튜브 소리를 막아요. 대신 여기서 바로 대화하면 영상 소리와 목소리가 같이 들려요!';
+}
+
+function handleVoiceOff(id) {
+  voiceSet.delete(id);
+  if (voiceCalls[id]) { try { voiceCalls[id].close(); } catch {} delete voiceCalls[id]; }
+  const a = document.getElementById('au-' + id);
+  if (a) a.remove();
+  updateVoiceUI();
+}
+
+$('btnVoice').addEventListener('click', () => { myStream ? stopVoice() : startVoice(); });
+$('btnMute').addEventListener('click', () => {
+  if (!myStream) return;
+  micMuted = !micMuted;
+  myStream.getAudioTracks().forEach(tr => { tr.enabled = !micMuted; });
+  $('btnMute').textContent = micMuted ? '음소거 해제' : '음소거';
+  toast(micMuted ? '내 마이크를 껐어요 🔇' : '마이크를 다시 켰어요 🎙');
+});
 
 /* ═══════════════ 유튜브 검색 (키 불필요 공개 API + 폴백) ═══════════════ */
 // 유튜브 공식 검색 API는 키 발급이 필요해서, 키 없이 되는 공개 미러 API를
@@ -638,6 +776,8 @@ window.__debug = () => ({
   playing: playerReady && player.getPlayerState() === 1,
   time: playerReady ? player.getCurrentTime() : 0,
   peers: Number($('peerCount').textContent),
+  voiceOn: !!myStream, voiceCalls: Object.keys(voiceCalls).length,
+  audioLive: [...document.querySelectorAll('#voiceAudios audio')].filter(a => a.srcObject && !a.paused).length,
   play: () => player.playVideo(), pause: () => player.pauseVideo(), seek: t => player.seekTo(t, true),
 });
 
