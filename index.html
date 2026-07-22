@@ -118,11 +118,12 @@
   .result .meta { font-size: 12.5px; color: #77748c; }
   .meta .ch { color: #8ab4f8; } /* 채널명 = 눌러서 채널로 이동 */
   #btnMore { width: 100%; }
-  #listHead { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
+  #listHead { display: flex; align-items: center; gap: 8px; }
   #listHead .lt {
-    font-size: 15px; color: #c9c6da; min-width: 0;
+    font-size: 15px; color: #c9c6da; min-width: 0; flex: 1;
     overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
   }
+  #listHead button { flex: none; }
 
   /* ── 검색어 자동완성 ── */
   #suggestBox {
@@ -289,6 +290,12 @@ function parseVideoId(text) {
   return m ? m[1] : null;
 }
 
+// 재생목록 링크에서 목록 ID 뽑기 (예: youtube.com/playlist?list=PL...)
+function parsePlaylistId(text) {
+  const m = (text || '').match(/[?&]list=([\w-]{10,60})/);
+  return m ? m[1] : null;
+}
+
 function showScreen(name) {
   $('landing').classList.toggle('active', name === 'landing');
   $('room').classList.toggle('active', name === 'room');
@@ -318,6 +325,17 @@ window.onYouTubeIframeAPIReady = function() {
 
 function onPlayerStateChange(e) {
   if (!currentVideoId) return;
+  // 영상이 끝나면: 재생목록 대기열이 있을 때 방장이 다음 곡으로 (모두에게 전파됨)
+  if (e.data === YT.PlayerState.ENDED) {
+    if (isHost && playQueue) {
+      const i = playQueue.indexOf(currentVideoId);
+      if (i >= 0 && i + 1 < playQueue.length) {
+        toast('다음 영상 재생 ▶');
+        loadVideo(playQueue[i + 1], true);
+      }
+    }
+    return;
+  }
   // 원격 명령을 적용하는 중이면 다시 방송하지 않음 (무한 에코 방지)
   if (Date.now() < suppressUntil) return;
   const t = player.getCurrentTime();
@@ -445,12 +463,22 @@ function handleMessage(msg, fromConn) {
     case 'voice-off':
       handleVoiceOff(msg.id);
       break;
-    case 'list': { // 친구가 검색하거나 채널을 열음 → 내 화면에도 같은 목록
+    case 'list': { // 친구가 검색/채널/재생목록을 열음 → 내 화면에도 같은 목록
+      if (msg.kind === 'playlists') { // 재생목록 카드 목록
+        const clean = (msg.items || []).filter(p => p && /^[\w-]{10,60}$/.test(p.plId)).slice(0, 40);
+        if (!clean.length) break;
+        listState = { mode: 'remote', next: null, listId: msg.listId };
+        renderPlaylistList(clean);
+        prependListHead('📁 ' + msg.label + ' — 친구가 열었어요', [{ text: '닫기', on: closeList }]);
+        break;
+      }
       const clean = (msg.items || []).filter(x => x && /^[\w-]{11}$/.test(x.id)).slice(0, 60);
       if (!clean.length) break;
+      if (msg.kind === 'playlist') playQueue = clean.map(x => x.id); // 나도 대기열 보유 (내가 방장이면 자동 진행)
       listState = { mode: 'remote', next: null, listId: msg.listId };
       renderResults(clean, false);
-      prependListHead((msg.kind === 'channel' ? '📺 ' : '🔍 ') + msg.label + ' — 친구가 열었어요', '닫기', closeList);
+      const icon = msg.kind === 'channel' ? '📺 ' : msg.kind === 'playlist' ? '🎬 ' : '🔍 ';
+      prependListHead(icon + msg.label + ' — 친구가 열었어요', [{ text: '닫기', on: closeList }]);
       break;
     }
     case 'list-more': { // 친구가 "더 보기"를 누름 → 같은 목록이면 이어붙이기
@@ -770,8 +798,7 @@ const RSS_PROXIES = [
   u => 'https://api.allorigins.win/raw?url=' + encodeURIComponent(u),
 ];
 
-async function fetchChannelVideos(id) {
-  const rssUrl = 'https://www.youtube.com/feeds/videos.xml?channel_id=' + id;
+async function fetchRssFeed(rssUrl) {
   for (const wrap of RSS_PROXIES) {
     try {
       const res = await fetch(wrap(rssUrl), { signal: AbortSignal.timeout(10000) });
@@ -800,11 +827,30 @@ async function fetchChannelVideos(id) {
   return null;
 }
 
+const fetchChannelVideos = id => fetchRssFeed('https://www.youtube.com/feeds/videos.xml?channel_id=' + id);
+const fetchPlaylistVideos = plId => fetchRssFeed('https://www.youtube.com/feeds/videos.xml?playlist_id=' + plId);
+
+// 채널의 재생목록 목록 (Piped 채널 탭 API — 이건 봇차단 없이 동작)
+async function fetchChannelPlaylists(id) {
+  try {
+    const ch = await fetchJson('https://api.piped.private.coffee/channel/' + id, 10000);
+    const tab = (ch.tabs || []).find(t => t.name === 'playlists');
+    if (!tab) return null;
+    const d = await fetchJson('https://api.piped.private.coffee/channels/tabs?data=' + encodeURIComponent(tab.data), 10000);
+    const items = (d.content || [])
+      .filter(i => i.url && i.url.includes('list='))
+      .map(i => ({ plId: i.url.split('list=')[1].split('&')[0], name: i.name || '재생목록', count: i.videos, thumb: i.thumbnail || '' }))
+      .filter(p => /^[\w-]{10,60}$/.test(p.plId));
+    return items.length ? { name: ch.name || '', items } : null;
+  } catch { return null; }
+}
+
 // 지금 보고 있는 목록의 상태 (더 보기 / 친구와 공유용)
-// mode: 'search'(내 검색) | 'channel'(내가 연 채널) | 'remote'(친구가 연 목록)
+// mode: 'search' | 'channel' | 'playlists' | 'playlist' | 'remote'(친구가 연 목록)
 let listState = null;
 let lastQuery = '';   // 채널에서 "돌아가기" 할 때 재검색용
 let listCounter = 0;
+let playQueue = null; // 재생목록 연속재생 대기열 (영상 id 배열, 방장이 자동 진행)
 
 function newListId() { return myPeerId() + '-' + (++listCounter); }
 
@@ -814,18 +860,25 @@ function closeList() {
   box.innerHTML = '';
 }
 
-// 목록 맨 위 제목줄 (채널 이름 / "친구가 열었어요" + 돌아가기·닫기 버튼)
-function prependListHead(title, backText, onBack) {
+// 목록 맨 위 제목줄 (제목 + 버튼들)
+function prependListHead(title, btns) {
   const head = document.createElement('div');
   head.id = 'listHead';
   const lt = document.createElement('div'); lt.className = 'lt'; lt.textContent = title;
-  const back = document.createElement('button'); back.className = 'ghost small'; back.textContent = backText;
-  back.addEventListener('click', onBack);
-  head.append(lt, back);
+  head.appendChild(lt);
+  (btns || []).forEach(b => {
+    const btn = document.createElement('button');
+    btn.className = 'ghost small';
+    btn.textContent = b.text;
+    btn.addEventListener('click', b.on);
+    head.appendChild(btn);
+  });
   const box = $('searchResults');
   box.prepend(head);
   box.scrollTop = 0;
 }
+
+let lastChannel = null; // 재생목록 화면에서 "채널로" 돌아갈 때 사용
 
 // 채널 페이지 열기 — 그 채널의 최신 영상 목록 (친구 화면에도 같이 뜸)
 async function openChannel(id, name) {
@@ -833,13 +886,77 @@ async function openChannel(id, name) {
   const r = await fetchChannelVideos(id);
   if (!r) { toast('채널 목록을 못 가져왔어요 🥲'); return; }
   const title = name || r.name || '채널';
+  lastChannel = { id, name: title };
   listState = { mode: 'channel', id, next: null, listId: newListId() };
   renderResults(r.items, false);
-  prependListHead('📺 ' + title + ' — 최신 영상', '← 돌아가기', () => {
-    if (lastQuery) { $('videoUrl').value = lastQuery; $('btnLoad').click(); }
-    else closeList();
-  });
+  prependListHead('📺 ' + title, [
+    { text: '재생목록', on: () => openChannelPlaylists(id, title) },
+    { text: '← 검색', on: () => { if (lastQuery) { $('videoUrl').value = lastQuery; $('btnLoad').click(); } else closeList(); } },
+  ]);
   send({ t: 'list', kind: 'channel', label: title, items: r.items, listId: listState.listId });
+}
+
+// 채널의 재생목록 목록 보기
+async function openChannelPlaylists(id, name) {
+  toast('재생목록 가져오는 중… 📁');
+  const r = await fetchChannelPlaylists(id);
+  if (!r) { toast('이 채널의 재생목록을 못 가져왔어요 🥲'); return; }
+  const title = name || r.name || '채널';
+  lastChannel = { id, name: title };
+  listState = { mode: 'playlists', listId: newListId() };
+  renderPlaylistList(r.items);
+  prependListHead('📁 ' + title + ' — 재생목록', [
+    { text: '최신 영상', on: () => openChannel(id, title) },
+    { text: '닫기', on: closeList },
+  ]);
+  send({ t: 'list', kind: 'playlists', label: title, items: r.items, listId: listState.listId });
+}
+
+// 재생목록 열기 — 담긴 영상들 보기 + 연속재생 대기열 설정
+async function openPlaylist(plId, name) {
+  toast('재생목록 여는 중… 🎬');
+  const r = await fetchPlaylistVideos(plId);
+  if (!r) { toast('재생목록을 못 가져왔어요 🥲 (비공개이거나 자동생성 목록일 수 있어요)'); return; }
+  const title = name || r.name || '재생목록';
+  listState = { mode: 'playlist', listId: newListId() };
+  playQueue = r.items.map(x => x.id); // 영상이 끝나면 다음 곡으로
+  renderResults(r.items, false);
+  const btns = [];
+  if (lastChannel) btns.push({ text: '← 채널로', on: () => openChannelPlaylists(lastChannel.id, lastChannel.name) });
+  btns.push({ text: '닫기', on: closeList });
+  prependListHead('🎬 ' + title, btns);
+  send({ t: 'list', kind: 'playlist', label: title, items: r.items, listId: listState.listId });
+  toast('영상을 고르면 이어서 자동 재생돼요 ▶');
+}
+
+// 재생목록 카드 (썸네일 + 이름 + 영상 수)
+function makePlaylistCard(p) {
+  const row = document.createElement('div');
+  row.className = 'result';
+  const tw = document.createElement('div');
+  tw.className = 'thumbwrap';
+  if (p.thumb) {
+    const img = document.createElement('img');
+    img.src = p.thumb;
+    img.loading = 'lazy';
+    tw.appendChild(img);
+  }
+  const badge = document.createElement('div');
+  badge.className = 'dur';
+  badge.textContent = p.count > 0 ? '▶ ' + p.count + '개' : '재생목록';
+  tw.appendChild(badge);
+  const t = document.createElement('div'); t.className = 't'; t.textContent = p.name;
+  const meta = document.createElement('div'); meta.className = 'meta'; meta.textContent = '재생목록';
+  row.append(tw, t, meta);
+  row.addEventListener('click', () => openPlaylist(p.plId, p.name));
+  return row;
+}
+
+function renderPlaylistList(items) {
+  const box = $('searchResults');
+  box.innerHTML = '';
+  items.forEach(p => box.appendChild(makePlaylistCard(p)));
+  box.style.display = items.length ? 'flex' : 'none';
 }
 
 function htmlDecode(s) {
@@ -1030,13 +1147,15 @@ $('btnLoad').addEventListener('click', async () => {
   suggestSeq++; // 진행 중이던 자동완성 응답 무시
   hideSuggest();
 
-  // 링크/영상 ID면 바로 재생
+  // 링크/영상 ID면 바로 재생 (재생목록 링크면 목록도 같이 열기 → 연속재생)
   const id = parseVideoId(text);
-  if (id) {
+  const plId = parsePlaylistId(text);
+  if (id || plId) {
     $('videoUrl').value = '';
     $('videoUrl').blur();
     $('searchResults').style.display = 'none';
-    loadVideo(id, true);
+    if (id) loadVideo(id, true);
+    if (plId) openPlaylist(plId, '');
     return;
   }
 
@@ -1087,6 +1206,7 @@ window.__debug = () => ({
   time: playerReady ? player.getCurrentTime() : 0,
   peers: Number($('peerCount').textContent),
   voiceOn: !!myStream, voiceCalls: Object.keys(voiceCalls).length,
+  queue: playQueue ? playQueue.length : 0,
   audioLive: [...document.querySelectorAll('#voiceAudios audio')].filter(a => a.srcObject && !a.paused).length,
   play: () => player.playVideo(), pause: () => player.pauseVideo(), seek: t => player.seekTo(t, true),
   // 음성 품질 통계 (지연/지터/손실/끊김보정) — 문제 진단용
