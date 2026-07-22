@@ -96,22 +96,36 @@
   .peers { font-size: 14px; color: #9a97ad; text-align: center; }
   .peers b { color: #5ee8a0; }
 
-  /* ── 검색 결과 ── */
-  #searchResults { display: none; flex-direction: column; gap: 8px; max-height: 340px; overflow-y: auto; }
-  .result {
-    display: flex; gap: 10px; align-items: center;
-    background: #101017; border: 1px solid transparent; border-radius: 12px;
-    padding: 8px; cursor: pointer;
+  /* ── 검색 결과 (유튜브 스타일 큰 카드) ── */
+  #searchResults { display: none; flex-direction: column; gap: 18px; max-height: 62vh; overflow-y: auto; }
+  .result { display: flex; flex-direction: column; gap: 8px; cursor: pointer; }
+  .thumbwrap {
+    position: relative; width: 100%; aspect-ratio: 16/9;
+    border-radius: 12px; overflow: hidden; background: #000;
   }
-  .result:active { border-color: #ff5d73; }
-  .result img { width: 96px; aspect-ratio: 16/9; border-radius: 8px; object-fit: cover; flex: none; background: #000; }
-  .result .info { min-width: 0; display: flex; flex-direction: column; gap: 3px; }
+  .thumbwrap img { width: 100%; height: 100%; object-fit: cover; display: block; }
+  .result:active .thumbwrap { outline: 2.5px solid #ff5d73; }
+  .dur {
+    position: absolute; right: 6px; bottom: 6px;
+    background: rgba(0,0,0,.8); color: #fff; font-size: 12px;
+    padding: 2px 6px; border-radius: 5px;
+  }
+  .dur.live { background: #cc0000; }
   .result .t {
-    font-size: 14px; line-height: 1.35; overflow: hidden;
+    font-size: 15px; line-height: 1.4; overflow: hidden;
     display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical;
   }
-  .result .c { font-size: 12px; color: #77748c; }
-  .result .d { font-size: 12px; color: #ffd166; }
+  .result .meta { font-size: 12.5px; color: #77748c; }
+  #btnMore { width: 100%; }
+
+  /* ── 검색어 자동완성 ── */
+  #suggestBox {
+    display: none; flex-direction: column;
+    background: #101017; border: 1px solid #2e2e3a; border-radius: 13px; overflow: hidden;
+  }
+  .sug { padding: 11px 15px; font-size: 15px; color: #d5d2e6; cursor: pointer; display: flex; gap: 10px; align-items: center; }
+  .sug:active { background: #1d1d28; }
+  .sug .icon { color: #55526a; font-size: 13px; }
 
   #toast {
     position: fixed; bottom: 28px; left: 50%; transform: translateX(-50%) translateY(80px);
@@ -185,6 +199,7 @@
         <input id="videoUrl" placeholder="검색어 또는 유튜브 링크" autocomplete="off">
         <button id="btnLoad" class="small">검색</button>
       </div>
+      <div id="suggestBox"></div>
       <div id="searchResults"></div>
     </div>
 
@@ -691,65 +706,196 @@ $('btnMute').addEventListener('click', () => {
 const SEARCH_BACKENDS = [
   {
     name: 'piped',
-    url: q => 'https://api.piped.private.coffee/search?q=' + encodeURIComponent(q) + '&filter=videos',
-    parse: d => (d.items || [])
-      .filter(i => i.url && i.url.includes('watch?v='))
-      .map(i => ({ id: i.url.split('v=')[1].slice(0, 11), title: i.title, channel: i.uploaderName || '', dur: i.duration })),
+    search: q => 'https://api.piped.private.coffee/search?q=' + encodeURIComponent(q) + '&filter=videos',
+    // 다음 페이지: nextpage 토큰 방식
+    nextUrl: (q, token) => 'https://api.piped.private.coffee/nextpage/search?nextpage=' + encodeURIComponent(token) + '&q=' + encodeURIComponent(q) + '&filter=videos',
+    suggest: q => 'https://api.piped.private.coffee/suggestions?query=' + encodeURIComponent(q),
+    parseSuggest: d => (Array.isArray(d) ? d : []),
+    parse: d => ({
+      items: (d.items || [])
+        .filter(i => i.url && i.url.includes('watch?v='))
+        .map(i => ({
+          id: i.url.split('v=')[1].slice(0, 11), title: i.title, channel: i.uploaderName || '',
+          dur: i.duration, views: i.views >= 0 ? i.views : null, ts: i.uploaded > 0 ? i.uploaded / 1000 : null,
+        })),
+      next: d.nextpage || null,
+    }),
   },
   {
     name: 'invidious',
-    url: q => 'https://inv.zoomerville.com/api/v1/search?q=' + encodeURIComponent(q) + '&type=video',
-    parse: d => (Array.isArray(d) ? d : [])
-      .filter(v => v.type === 'video' && v.videoId)
-      .map(v => ({ id: v.videoId, title: v.title, channel: v.author || '', dur: v.lengthSeconds })),
+    search: q => 'https://inv.zoomerville.com/api/v1/search?q=' + encodeURIComponent(q) + '&type=video',
+    // 다음 페이지: page 번호 방식
+    nextUrl: (q, page) => 'https://inv.zoomerville.com/api/v1/search?q=' + encodeURIComponent(q) + '&type=video&page=' + page,
+    suggest: q => 'https://inv.zoomerville.com/api/v1/search/suggestions?q=' + encodeURIComponent(q),
+    parseSuggest: d => ((d && d.suggestions) || []).map(htmlDecode),
+    parse: (d, page) => ({
+      items: (Array.isArray(d) ? d : [])
+        .filter(v => v.type === 'video' && v.videoId)
+        .map(v => ({
+          id: v.videoId, title: v.title, channel: v.author || '',
+          dur: v.lengthSeconds, views: v.viewCount >= 0 ? v.viewCount : null, ts: v.published || null,
+        })),
+      next: (page || 1) + 1,
+    }),
   },
 ];
+
+// 현재 검색 상태 (더 보기용)
+let searchState = null; // { q, backend, next }
+
+function htmlDecode(s) {
+  return new DOMParser().parseFromString(s, 'text/html').documentElement.textContent || s;
+}
+
+async function fetchJson(url, ms) {
+  const res = await fetch(url, { signal: AbortSignal.timeout(ms || 8000) });
+  if (!res.ok) throw new Error(res.status);
+  return res.json();
+}
 
 async function searchYouTube(q) {
   for (const b of SEARCH_BACKENDS) {
     try {
-      const res = await fetch(b.url(q), { signal: AbortSignal.timeout(8000) });
-      if (!res.ok) continue;
-      const items = b.parse(await res.json()).filter(x => /^[\w-]{11}$/.test(x.id));
-      if (items.length) return items.slice(0, 15);
+      const { items, next } = b.parse(await fetchJson(b.search(q)), 1);
+      const ok = items.filter(x => /^[\w-]{11}$/.test(x.id));
+      if (ok.length) { searchState = { q, backend: b, next }; return ok; }
     } catch {} // 이 백엔드는 실패 → 다음 것 시도
   }
   return null;
 }
 
+async function searchMore() {
+  if (!searchState || !searchState.next) return null;
+  const { q, backend, next } = searchState;
+  try {
+    const { items, next: n2 } = backend.parse(await fetchJson(backend.nextUrl(q, next)), typeof next === 'number' ? next : 1);
+    searchState.next = n2;
+    return items.filter(x => /^[\w-]{11}$/.test(x.id));
+  } catch { return null; }
+}
+
 function fmtDur(sec) {
-  if (!sec || sec <= 0) return 'LIVE';
+  if (!sec || sec <= 0) return null; // 실시간
   const h = Math.floor(sec / 3600), m = Math.floor(sec % 3600 / 60), s = Math.floor(sec % 60);
   return (h ? h + ':' + String(m).padStart(2, '0') : m) + ':' + String(s).padStart(2, '0');
 }
 
-function renderResults(items) {
-  const box = $('searchResults');
-  box.innerHTML = '';
-  items.forEach(r => {
-    const row = document.createElement('div');
-    row.className = 'result';
-    const img = document.createElement('img');
-    img.src = 'https://i.ytimg.com/vi/' + r.id + '/mqdefault.jpg';
-    img.loading = 'lazy';
-    const info = document.createElement('div');
-    info.className = 'info';
-    const t = document.createElement('div'); t.className = 't'; t.textContent = r.title;
-    const c = document.createElement('div'); c.className = 'c'; c.textContent = r.channel;
-    const d = document.createElement('div'); d.className = 'd'; d.textContent = fmtDur(r.dur);
-    info.append(t, c, d);
-    row.append(img, info);
-    row.addEventListener('click', () => {
-      box.style.display = 'none';
-      box.innerHTML = '';
-      $('videoUrl').value = '';
-      loadVideo(r.id, true);
-      toast('영상을 틀었어요 🎬');
-    });
-    box.appendChild(row);
-  });
-  box.style.display = items.length ? 'flex' : 'none';
+// 조회수를 유튜브처럼: 1.2천회 / 12만회 / 1.5억회
+function fmtViews(n) {
+  if (n == null) return null;
+  if (n >= 1e8) { const v = n / 1e8; return '조회수 ' + (v < 10 ? v.toFixed(1) : Math.round(v)) + '억회'; }
+  if (n >= 1e4) { const v = n / 1e4; return '조회수 ' + (v < 10 ? v.toFixed(1) : Math.round(v)) + '만회'; }
+  if (n >= 1e3) return '조회수 ' + (n / 1e3).toFixed(1) + '천회';
+  return '조회수 ' + n + '회';
 }
+
+// 업로드 시점을 유튜브처럼: 3년 전 / 2개월 전 / 5일 전 ...
+function fmtAgo(tsSec) {
+  if (!tsSec) return null;
+  const d = Date.now() / 1000 - tsSec;
+  if (d < 0) return null;
+  const u = [[31536000, '년'], [2592000, '개월'], [604800, '주'], [86400, '일'], [3600, '시간'], [60, '분']];
+  for (const [sec, name] of u) if (d >= sec) return Math.floor(d / sec) + name + ' 전';
+  return '방금 전';
+}
+
+function makeResultCard(r) {
+  const row = document.createElement('div');
+  row.className = 'result';
+  const tw = document.createElement('div');
+  tw.className = 'thumbwrap';
+  const img = document.createElement('img');
+  img.src = 'https://i.ytimg.com/vi/' + r.id + '/mqdefault.jpg';
+  img.loading = 'lazy';
+  tw.appendChild(img);
+  const durText = fmtDur(r.dur);
+  const dur = document.createElement('div');
+  dur.className = durText ? 'dur' : 'dur live';
+  dur.textContent = durText || '실시간';
+  tw.appendChild(dur);
+  const t = document.createElement('div'); t.className = 't'; t.textContent = r.title;
+  const meta = document.createElement('div'); meta.className = 'meta';
+  meta.textContent = [r.channel, fmtViews(r.views), fmtAgo(r.ts)].filter(Boolean).join(' · ');
+  row.append(tw, t, meta);
+  row.addEventListener('click', () => {
+    $('searchResults').style.display = 'none';
+    $('searchResults').innerHTML = '';
+    $('videoUrl').value = '';
+    loadVideo(r.id, true);
+    toast('영상을 틀었어요 🎬');
+  });
+  return row;
+}
+
+function renderResults(items, append) {
+  const box = $('searchResults');
+  const oldMore = $('btnMore');
+  if (oldMore) oldMore.remove();
+  if (!append) box.innerHTML = '';
+  items.forEach(r => box.appendChild(makeResultCard(r)));
+  if (searchState && searchState.next) {
+    const more = document.createElement('button');
+    more.id = 'btnMore';
+    more.className = 'ghost small';
+    more.textContent = '결과 더 보기';
+    more.addEventListener('click', async () => {
+      more.disabled = true; more.textContent = '불러오는 중…';
+      const extra = await searchMore();
+      if (extra && extra.length) renderResults(extra, true);
+      else { more.remove(); toast('더 가져올 결과가 없어요'); }
+    });
+    box.appendChild(more);
+  }
+  box.style.display = box.querySelector('.result') ? 'flex' : 'none';
+}
+
+/* ── 검색어 자동완성 (입력 중 추천) ── */
+let suggestTimer = null;
+let suggestSeq = 0;
+
+async function fetchSuggestions(q) {
+  for (const b of SEARCH_BACKENDS) {
+    try {
+      const list = b.parseSuggest(await fetchJson(b.suggest(q), 4000)).filter(Boolean);
+      if (list.length) return list.slice(0, 8);
+    } catch {}
+  }
+  return [];
+}
+
+function hideSuggest() { $('suggestBox').style.display = 'none'; $('suggestBox').innerHTML = ''; }
+
+$('videoUrl').addEventListener('input', () => {
+  clearTimeout(suggestTimer);
+  const text = $('videoUrl').value.trim();
+  // 링크를 붙여넣는 중이거나 비었으면 추천 안 함
+  if (!text || text.includes('http') || text.includes('/') || parseVideoId(text)) { hideSuggest(); return; }
+  suggestTimer = setTimeout(async () => {
+    const seq = ++suggestSeq;
+    const list = await fetchSuggestions(text);
+    if (seq !== suggestSeq) return; // 그 사이 입력이 바뀜 → 버림
+    if ($('videoUrl').value.trim() !== text) return;
+    const box = $('suggestBox');
+    box.innerHTML = '';
+    list.forEach(s => {
+      const row = document.createElement('div');
+      row.className = 'sug';
+      const ic = document.createElement('span'); ic.className = 'icon'; ic.textContent = '🔍';
+      const tx = document.createElement('span'); tx.textContent = s;
+      row.append(ic, tx);
+      // click 대신 pointerdown: blur보다 먼저 잡히도록
+      row.addEventListener('pointerdown', e => {
+        e.preventDefault();
+        $('videoUrl').value = s;
+        hideSuggest();
+        $('btnLoad').click();
+      });
+      box.appendChild(row);
+    });
+    box.style.display = list.length ? 'flex' : 'none';
+  }, 250);
+});
+$('videoUrl').addEventListener('blur', () => setTimeout(hideSuggest, 250));
 
 /* ═══════════════ 버튼 & 시작 ═══════════════ */
 $('btnCreate').addEventListener('click', createRoom);
@@ -764,6 +910,9 @@ $('joinCode').addEventListener('keydown', e => { if (e.key === 'Enter') $('btnJo
 $('btnLoad').addEventListener('click', async () => {
   const text = $('videoUrl').value.trim();
   if (!text) { toast('검색어나 유튜브 링크를 입력해 주세요'); return; }
+  clearTimeout(suggestTimer);
+  suggestSeq++; // 진행 중이던 자동완성 응답 무시
+  hideSuggest();
 
   // 링크/영상 ID면 바로 재생
   const id = parseVideoId(text);
