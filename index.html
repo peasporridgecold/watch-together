@@ -779,6 +779,34 @@ window.__debug = () => ({
   voiceOn: !!myStream, voiceCalls: Object.keys(voiceCalls).length,
   audioLive: [...document.querySelectorAll('#voiceAudios audio')].filter(a => a.srcObject && !a.paused).length,
   play: () => player.playVideo(), pause: () => player.pauseVideo(), seek: t => player.seekTo(t, true),
+  // 음성 품질 통계 (지연/지터/손실/끊김보정) — 문제 진단용
+  voiceStats: async () => {
+    const out = [];
+    for (const [id, c] of Object.entries(voiceCalls)) {
+      const pc = c.peerConnection;
+      if (!pc) continue;
+      const stats = await pc.getStats();
+      const r = { id: id.slice(0, 8) };
+      const byId = {};
+      stats.forEach(s => { byId[s.id] = s; });
+      stats.forEach(s => {
+        if (s.type === 'inbound-rtp' && s.kind === 'audio') {
+          r.packetsReceived = s.packetsReceived; r.packetsLost = s.packetsLost;
+          r.jitterMs = Math.round((s.jitter || 0) * 1000);
+          r.concealedSamples = s.concealedSamples; r.totalSamples = s.totalSamplesReceived;
+          r.jitterBufferMs = s.jitterBufferEmittedCount ? Math.round(s.jitterBufferDelay / s.jitterBufferEmittedCount * 1000) : null;
+          r.audioLevel = s.audioLevel;
+        }
+        if (s.type === 'candidate-pair' && s.nominated && s.state === 'succeeded') {
+          r.rttMs = s.currentRoundTripTime != null ? Math.round(s.currentRoundTripTime * 1000) : null;
+          const lc = byId[s.localCandidateId], rc = byId[s.remoteCandidateId];
+          r.route = (lc ? lc.candidateType : '?') + '→' + (rc ? rc.candidateType : '?');
+        }
+      });
+      out.push(r);
+    }
+    return out;
+  },
 });
 
 // 링크에 ?room=코드 가 있으면 자동 참여
