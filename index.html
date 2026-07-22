@@ -116,7 +116,13 @@
     display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical;
   }
   .result .meta { font-size: 12.5px; color: #77748c; }
+  .meta .ch { color: #8ab4f8; } /* 채널명 = 눌러서 채널로 이동 */
   #btnMore { width: 100%; }
+  #listHead { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
+  #listHead .lt {
+    font-size: 15px; color: #c9c6da; min-width: 0;
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  }
 
   /* ── 검색어 자동완성 ── */
   #suggestBox {
@@ -439,6 +445,21 @@ function handleMessage(msg, fromConn) {
     case 'voice-off':
       handleVoiceOff(msg.id);
       break;
+    case 'list': { // 친구가 검색하거나 채널을 열음 → 내 화면에도 같은 목록
+      const clean = (msg.items || []).filter(x => x && /^[\w-]{11}$/.test(x.id)).slice(0, 60);
+      if (!clean.length) break;
+      listState = { mode: 'remote', next: null, listId: msg.listId };
+      renderResults(clean, false);
+      prependListHead((msg.kind === 'channel' ? '📺 ' : '🔍 ') + msg.label + ' — 친구가 열었어요', '닫기', closeList);
+      break;
+    }
+    case 'list-more': { // 친구가 "더 보기"를 누름 → 같은 목록이면 이어붙이기
+      const clean = (msg.items || []).filter(x => x && /^[\w-]{11}$/.test(x.id)).slice(0, 60);
+      if (listState && listState.mode === 'remote' && listState.listId === msg.listId && clean.length) {
+        renderResults(clean, true);
+      }
+      break;
+    }
   }
 }
 
@@ -717,6 +738,7 @@ const SEARCH_BACKENDS = [
         .map(i => ({
           id: i.url.split('v=')[1].slice(0, 11), title: i.title, channel: i.uploaderName || '',
           dur: i.duration, views: i.views >= 0 ? i.views : null, ts: i.uploaded > 0 ? i.uploaded / 1000 : null,
+          channelId: i.uploaderUrl && i.uploaderUrl.indexOf('/channel/') === 0 ? i.uploaderUrl.slice(9) : null,
         })),
       next: d.nextpage || null,
     }),
@@ -734,14 +756,89 @@ const SEARCH_BACKENDS = [
         .map(v => ({
           id: v.videoId, title: v.title, channel: v.author || '',
           dur: v.lengthSeconds, views: v.viewCount >= 0 ? v.viewCount : null, ts: v.published || null,
+          channelId: v.authorId || null,
         })),
       next: (page || 1) + 1,
     }),
   },
 ];
 
-// 현재 검색 상태 (더 보기용)
-let searchState = null; // { q, backend, next }
+// 채널 영상 목록 (Invidious가 채널 쪽은 더 안정적이라 먼저 시도)
+const CHANNEL_BACKENDS = [
+  {
+    url: id => 'https://inv.zoomerville.com/api/v1/channels/' + id + '/videos',
+    nextUrl: (id, tok) => 'https://inv.zoomerville.com/api/v1/channels/' + id + '/videos?continuation=' + encodeURIComponent(tok),
+    parse: d => ({
+      name: (d.videos && d.videos[0] && d.videos[0].author) || '',
+      items: ((d && d.videos) || []).map(v => ({
+        id: v.videoId, title: v.title, channel: v.author || '',
+        dur: v.lengthSeconds, views: v.viewCount >= 0 ? v.viewCount : null, ts: v.published || null, channelId: null,
+      })),
+      next: d.continuation || null,
+    }),
+  },
+  {
+    url: id => 'https://api.piped.private.coffee/channel/' + id,
+    nextUrl: (id, tok) => 'https://api.piped.private.coffee/nextpage/channel/' + id + '?nextpage=' + encodeURIComponent(tok),
+    parse: d => ({
+      name: d.name || '',
+      items: (d.relatedStreams || []).filter(i => i.url && i.url.includes('watch?v=')).map(i => ({
+        id: i.url.split('v=')[1].slice(0, 11), title: i.title, channel: i.uploaderName || d.name || '',
+        dur: i.duration, views: i.views >= 0 ? i.views : null, ts: i.uploaded > 0 ? i.uploaded / 1000 : null, channelId: null,
+      })),
+      next: d.nextpage || null,
+    }),
+  },
+];
+
+// 지금 보고 있는 목록의 상태 (더 보기 / 친구와 공유용)
+// mode: 'search'(내 검색) | 'channel'(내가 연 채널) | 'remote'(친구가 연 목록)
+let listState = null;
+let lastQuery = '';   // 채널에서 "돌아가기" 할 때 재검색용
+let listCounter = 0;
+
+function newListId() { return myPeerId() + '-' + (++listCounter); }
+
+function closeList() {
+  const box = $('searchResults');
+  box.style.display = 'none';
+  box.innerHTML = '';
+}
+
+// 목록 맨 위 제목줄 (채널 이름 / "친구가 열었어요" + 돌아가기·닫기 버튼)
+function prependListHead(title, backText, onBack) {
+  const head = document.createElement('div');
+  head.id = 'listHead';
+  const lt = document.createElement('div'); lt.className = 'lt'; lt.textContent = title;
+  const back = document.createElement('button'); back.className = 'ghost small'; back.textContent = backText;
+  back.addEventListener('click', onBack);
+  head.append(lt, back);
+  const box = $('searchResults');
+  box.prepend(head);
+  box.scrollTop = 0;
+}
+
+// 채널 페이지 열기 — 그 채널의 최신 영상 목록 (친구 화면에도 같이 뜸)
+async function openChannel(id, name) {
+  toast('채널 여는 중… 📺');
+  for (const b of CHANNEL_BACKENDS) {
+    try {
+      const parsed = b.parse(await fetchJson(b.url(id)));
+      const items = parsed.items.filter(x => /^[\w-]{11}$/.test(x.id));
+      if (!items.length) continue;
+      const title = name || parsed.name || '채널';
+      listState = { mode: 'channel', id, backend: b, next: parsed.next, listId: newListId() };
+      renderResults(items, false);
+      prependListHead('📺 ' + title, '← 돌아가기', () => {
+        if (lastQuery) { $('videoUrl').value = lastQuery; $('btnLoad').click(); }
+        else closeList();
+      });
+      send({ t: 'list', kind: 'channel', label: title, items, listId: listState.listId });
+      return;
+    } catch {}
+  }
+  toast('채널 목록을 못 가져왔어요 🥲');
+}
 
 function htmlDecode(s) {
   return new DOMParser().parseFromString(s, 'text/html').documentElement.textContent || s;
@@ -758,19 +855,23 @@ async function searchYouTube(q) {
     try {
       const { items, next } = b.parse(await fetchJson(b.search(q)), 1);
       const ok = items.filter(x => /^[\w-]{11}$/.test(x.id));
-      if (ok.length) { searchState = { q, backend: b, next }; return ok; }
+      if (ok.length) { listState = { mode: 'search', q, backend: b, next, listId: newListId() }; return ok; }
     } catch {} // 이 백엔드는 실패 → 다음 것 시도
   }
   return null;
 }
 
-async function searchMore() {
-  if (!searchState || !searchState.next) return null;
-  const { q, backend, next } = searchState;
+// "더 보기" — 검색이면 다음 페이지, 채널이면 이어지는 영상들
+async function loadMoreItems() {
+  if (!listState || !listState.next) return null;
+  const st = listState;
   try {
-    const { items, next: n2 } = backend.parse(await fetchJson(backend.nextUrl(q, next)), typeof next === 'number' ? next : 1);
-    searchState.next = n2;
-    return items.filter(x => /^[\w-]{11}$/.test(x.id));
+    let parsed;
+    if (st.mode === 'search') parsed = st.backend.parse(await fetchJson(st.backend.nextUrl(st.q, st.next)), typeof st.next === 'number' ? st.next : 1);
+    else if (st.mode === 'channel') parsed = st.backend.parse(await fetchJson(st.backend.nextUrl(st.id, st.next)));
+    else return null;
+    st.next = parsed.next;
+    return parsed.items.filter(x => /^[\w-]{11}$/.test(x.id));
   } catch { return null; }
 }
 
@@ -815,7 +916,18 @@ function makeResultCard(r) {
   tw.appendChild(dur);
   const t = document.createElement('div'); t.className = 't'; t.textContent = r.title;
   const meta = document.createElement('div'); meta.className = 'meta';
-  meta.textContent = [r.channel, fmtViews(r.views), fmtAgo(r.ts)].filter(Boolean).join(' · ');
+  const rest = [fmtViews(r.views), fmtAgo(r.ts)].filter(Boolean).join(' · ');
+  if (r.channel && r.channelId) {
+    // 채널명은 파란 링크 — 누르면 채널 페이지로
+    const ch = document.createElement('span');
+    ch.className = 'ch';
+    ch.textContent = r.channel;
+    ch.addEventListener('click', e => { e.stopPropagation(); openChannel(r.channelId, r.channel); });
+    meta.appendChild(ch);
+    if (rest) meta.appendChild(document.createTextNode(' · ' + rest));
+  } else {
+    meta.textContent = [r.channel, rest].filter(Boolean).join(' · ');
+  }
   row.append(tw, t, meta);
   row.addEventListener('click', () => {
     $('searchResults').style.display = 'none';
@@ -833,16 +945,19 @@ function renderResults(items, append) {
   if (oldMore) oldMore.remove();
   if (!append) box.innerHTML = '';
   items.forEach(r => box.appendChild(makeResultCard(r)));
-  if (searchState && searchState.next) {
+  if (listState && listState.next) {
     const more = document.createElement('button');
     more.id = 'btnMore';
     more.className = 'ghost small';
     more.textContent = '결과 더 보기';
     more.addEventListener('click', async () => {
       more.disabled = true; more.textContent = '불러오는 중…';
-      const extra = await searchMore();
-      if (extra && extra.length) renderResults(extra, true);
-      else { more.remove(); toast('더 가져올 결과가 없어요'); }
+      const extra = await loadMoreItems();
+      if (extra && extra.length) {
+        renderResults(extra, true);
+        // 친구 화면에도 이어붙이기
+        send({ t: 'list-more', items: extra, listId: listState.listId });
+      } else { more.remove(); toast('더 가져올 결과가 없어요'); }
     });
     box.appendChild(more);
   }
@@ -931,7 +1046,10 @@ $('btnLoad').addEventListener('click', async () => {
   try {
     const items = await searchYouTube(text);
     if (!items) { toast('지금은 검색이 안 돼요 🥲 유튜브 링크를 붙여넣어 주세요'); return; }
+    lastQuery = text;
     renderResults(items);
+    // 친구 화면에도 같은 검색 결과 보여주기 (같이 보면서 고르기)
+    send({ t: 'list', kind: 'search', label: text, items, listId: listState.listId });
   } finally {
     btn.disabled = false; btn.textContent = '검색';
   }
