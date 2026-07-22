@@ -626,6 +626,48 @@ function updateVoiceUI() {
     : '전화 앱으로 통화하면 폰이 유튜브 소리를 막아요. 대신 여기서 바로 대화하면 영상 소리와 목소리가 같이 들려요!';
 }
 
+// 음성 연결 품질 통계 수집 (UI 표시 + __debug 공용)
+async function voiceStatsAll() {
+  const out = [];
+  for (const [id, c] of Object.entries(voiceCalls)) {
+    const pc = c.peerConnection;
+    if (!pc) continue;
+    const stats = await pc.getStats();
+    const r = { id: id.slice(0, 8) };
+    const byId = {};
+    stats.forEach(s => { byId[s.id] = s; });
+    stats.forEach(s => {
+      if (s.type === 'inbound-rtp' && s.kind === 'audio') {
+        r.packetsReceived = s.packetsReceived; r.packetsLost = s.packetsLost;
+        r.jitterMs = Math.round((s.jitter || 0) * 1000);
+        r.concealedSamples = s.concealedSamples; r.totalSamples = s.totalSamplesReceived;
+        r.jitterBufferMs = s.jitterBufferEmittedCount ? Math.round(s.jitterBufferDelay / s.jitterBufferEmittedCount * 1000) : null;
+        r.audioLevel = s.audioLevel;
+      }
+      if (s.type === 'candidate-pair' && s.nominated && s.state === 'succeeded') {
+        r.rttMs = s.currentRoundTripTime != null ? Math.round(s.currentRoundTripTime * 1000) : null;
+        const lc = byId[s.localCandidateId], rc = byId[s.remoteCandidateId];
+        r.route = (lc ? lc.candidateType : '?') + '→' + (rc ? rc.candidateType : '?');
+      }
+    });
+    out.push(r);
+  }
+  return out;
+}
+
+// 통화 중엔 3초마다 연결 품질을 카드에 표시 (직접연결/중계, 지연)
+setInterval(async () => {
+  if (!myStream || Object.keys(voiceCalls).length === 0) return;
+  try {
+    const s = (await voiceStatsAll())[0];
+    if (!s || s.rttMs == null) return;
+    const relay = s.route && s.route.includes('relay');
+    const n = Object.keys(voiceCalls).length;
+    $('voiceHint').textContent =
+      `🔊 ${n + 1}명 대화 중 · ${relay ? '중계 서버 경유 🟡' : '직접 연결 🟢'} · 네트워크 지연 ${s.rttMs}ms`;
+  } catch {}
+}, 3000);
+
 function handleVoiceOff(id) {
   voiceSet.delete(id);
   if (voiceCalls[id]) { try { voiceCalls[id].close(); } catch {} delete voiceCalls[id]; }
@@ -780,33 +822,7 @@ window.__debug = () => ({
   audioLive: [...document.querySelectorAll('#voiceAudios audio')].filter(a => a.srcObject && !a.paused).length,
   play: () => player.playVideo(), pause: () => player.pauseVideo(), seek: t => player.seekTo(t, true),
   // 음성 품질 통계 (지연/지터/손실/끊김보정) — 문제 진단용
-  voiceStats: async () => {
-    const out = [];
-    for (const [id, c] of Object.entries(voiceCalls)) {
-      const pc = c.peerConnection;
-      if (!pc) continue;
-      const stats = await pc.getStats();
-      const r = { id: id.slice(0, 8) };
-      const byId = {};
-      stats.forEach(s => { byId[s.id] = s; });
-      stats.forEach(s => {
-        if (s.type === 'inbound-rtp' && s.kind === 'audio') {
-          r.packetsReceived = s.packetsReceived; r.packetsLost = s.packetsLost;
-          r.jitterMs = Math.round((s.jitter || 0) * 1000);
-          r.concealedSamples = s.concealedSamples; r.totalSamples = s.totalSamplesReceived;
-          r.jitterBufferMs = s.jitterBufferEmittedCount ? Math.round(s.jitterBufferDelay / s.jitterBufferEmittedCount * 1000) : null;
-          r.audioLevel = s.audioLevel;
-        }
-        if (s.type === 'candidate-pair' && s.nominated && s.state === 'succeeded') {
-          r.rttMs = s.currentRoundTripTime != null ? Math.round(s.currentRoundTripTime * 1000) : null;
-          const lc = byId[s.localCandidateId], rc = byId[s.remoteCandidateId];
-          r.route = (lc ? lc.candidateType : '?') + '→' + (rc ? rc.candidateType : '?');
-        }
-      });
-      out.push(r);
-    }
-    return out;
-  },
+  voiceStats: voiceStatsAll,
 });
 
 // 링크에 ?room=코드 가 있으면 자동 참여
