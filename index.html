@@ -134,6 +134,12 @@
   .sug:active { background: #1d1d28; }
   .sug .icon { color: #55526a; font-size: 13px; }
 
+  /* ── 음량 조절 ── */
+  .volrow { display: flex; align-items: center; gap: 10px; }
+  .vlabel { font-size: 14px; color: #9a97ad; width: 34px; flex: none; }
+  .vval { font-size: 13px; color: #77748c; width: 44px; text-align: right; flex: none; }
+  input[type="range"] { flex: 1; accent-color: #ff5d73; height: 26px; margin: 0; padding: 0; border: none; background: transparent; }
+
   #toast {
     position: fixed; bottom: 28px; left: 50%; transform: translateX(-50%) translateY(80px);
     background: #2b2b38; color: #fff; font-size: 14px; padding: 11px 20px;
@@ -199,6 +205,21 @@
       <div class="hint" id="voiceHint">전화 앱으로 통화하면 폰이 유튜브 소리를 막아요. 대신 여기서 바로 대화하면 영상 소리와 목소리가 같이 들려요!</div>
     </div>
     <div id="voiceAudios" style="display:none"></div>
+
+    <div class="card">
+      <h2>🔊 소리 조절</h2>
+      <div class="volrow">
+        <span class="vlabel">영상</span>
+        <input type="range" id="volVideo" min="0" max="100" value="100">
+        <span class="vval" id="volVideoVal">100%</span>
+      </div>
+      <div class="volrow">
+        <span class="vlabel">통화</span>
+        <input type="range" id="volVoice" min="0" max="100" value="100">
+        <span class="vval" id="volVoiceVal">100%</span>
+      </div>
+      <div class="hint">폰 볼륨 버튼은 전체 음량이에요. 여기서 영상 소리만 줄이면 통화 소리를 크게 유지할 수 있어요.</div>
+    </div>
 
     <div class="card">
       <h2>🔍 영상 찾기</h2>
@@ -315,6 +336,7 @@ window.onYouTubeIframeAPIReady = function() {
     events: {
       onReady: () => {
         playerReady = true;
+        applyVideoVol(); // 저장해 둔 영상 음량 적용
         // 플레이어 준비 전에 도착해 보관해 둔 상태가 있으면 바로 적용
         if (pendingState) { const st = pendingState; pendingState = null; applyRemoteState(st); }
       },
@@ -351,6 +373,7 @@ function loadVideo(id, broadcast) {
   $('playerEmpty').style.display = 'none';
   suppressUntil = Date.now() + 2000;
   player.loadVideoById(id);
+  applyVideoVol();
   if (!userInteracted) showTapOverlay({ videoId: id, time: 0, playing: true });
   if (broadcast) send({ t: 'video', id });
 }
@@ -675,6 +698,7 @@ function attachAudio(id, stream) {
     $('voiceAudios').appendChild(a);
   }
   a.srcObject = stream;
+  a.volume = voiceVol / 100; // 통화 음량 슬라이더 값 적용
   // 모바일에서 자동재생이 막히면 탭 한 번으로 풀리게
   a.play().catch(() => toast('화면을 한 번 탭하면 친구 목소리가 들려요 👆'));
   updateVoiceUI();
@@ -748,6 +772,38 @@ $('btnMute').addEventListener('click', () => {
   $('btnMute').textContent = micMuted ? '음소거 해제' : '음소거';
   toast(micMuted ? '내 마이크를 껐어요 🔇' : '마이크를 다시 켰어요 🎙');
 });
+
+/* ═══════════════ 음량 분리 조절 (영상 / 통화) ═══════════════ */
+// 폰 볼륨 버튼은 미디어 음량 전체를 움직이므로, 앱 안에서 각각 따로 조절한다.
+function loadVol(key) {
+  const raw = localStorage.getItem(key);
+  const n = raw === null ? 100 : Number(raw);
+  return Number.isFinite(n) ? Math.min(100, Math.max(0, n)) : 100;
+}
+let videoVol = loadVol('vol-video');
+let voiceVol = loadVol('vol-voice');
+
+function applyVideoVol() {
+  if (!playerReady || !player.setVolume) return;
+  player.setVolume(videoVol);
+  if (videoVol > 0 && player.isMuted && player.isMuted()) player.unMute();
+}
+function applyVoiceVol() {
+  document.querySelectorAll('#voiceAudios audio').forEach(a => { a.volume = voiceVol / 100; });
+}
+
+function wireVolSlider(inputId, valId, onChange) {
+  const el = $(inputId);
+  el.addEventListener('input', () => {
+    const v = Number(el.value);
+    $(valId).textContent = v + '%';
+    onChange(v);
+  });
+}
+$('volVideo').value = videoVol; $('volVideoVal').textContent = videoVol + '%';
+$('volVoice').value = voiceVol; $('volVoiceVal').textContent = voiceVol + '%';
+wireVolSlider('volVideo', 'volVideoVal', v => { videoVol = v; localStorage.setItem('vol-video', v); applyVideoVol(); });
+wireVolSlider('volVoice', 'volVoiceVal', v => { voiceVol = v; localStorage.setItem('vol-voice', v); applyVoiceVol(); });
 
 /* ═══════════════ 유튜브 검색 (키 불필요 공개 API + 폴백) ═══════════════ */
 // 유튜브 공식 검색 API는 키 발급이 필요해서, 키 없이 되는 공개 미러 API를
@@ -1207,6 +1263,8 @@ window.__debug = () => ({
   peers: Number($('peerCount').textContent),
   voiceOn: !!myStream, voiceCalls: Object.keys(voiceCalls).length,
   queue: playQueue ? playQueue.length : 0,
+  videoVolume: playerReady && player.getVolume ? player.getVolume() : null,
+  voiceVolume: (document.querySelector('#voiceAudios audio') || {}).volume ?? null,
   audioLive: [...document.querySelectorAll('#voiceAudios audio')].filter(a => a.srcObject && !a.paused).length,
   play: () => player.playVideo(), pause: () => player.pauseVideo(), seek: t => player.seekTo(t, true),
   // 음성 품질 통계 (지연/지터/손실/끊김보정) — 문제 진단용
