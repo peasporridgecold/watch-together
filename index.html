@@ -369,13 +369,16 @@ function onPlayerStateChange(e) {
 }
 
 function loadVideo(id, broadcast) {
-  currentVideoId = id;
+  if (broadcast) send({ t: 'video', id });
   $('playerEmpty').style.display = 'none';
+  // 플레이어가 아직 준비 전이면 보관해 뒀다가 onReady에서 적용 (currentVideoId는
+  // 여기서 바꾸면 안 됨 — applyRemoteState가 로드를 건너뛰게 됨)
+  if (!playerReady) { pendingState = { videoId: id, time: 0, playing: true }; return; }
+  currentVideoId = id;
   suppressUntil = Date.now() + 2000;
   player.loadVideoById(id);
   applyVideoVol();
   if (!userInteracted) showTapOverlay({ videoId: id, time: 0, playing: true });
-  if (broadcast) send({ t: 'video', id });
 }
 
 // 원격에서 온 재생 상태를 실제 플레이어에 적용
