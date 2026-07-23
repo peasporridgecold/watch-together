@@ -378,6 +378,12 @@ function onRateChange(e) {
   send({ t: 'rate', rate: e.data });
 }
 
+// "재생 중인가?" — 버퍼링도 재생 의도로 취급 (버퍼링을 정지로 오판해 상대를 멈추는 것 방지)
+function isPlayingIntent() {
+  const s = player.getPlayerState();
+  return s === YT.PlayerState.PLAYING || s === YT.PlayerState.BUFFERING;
+}
+
 function loadVideo(id, broadcast) {
   if (broadcast) send({ t: 'video', id });
   playlistId = null; // 단일 영상 재생 = 재생목록 모드 종료
@@ -472,7 +478,7 @@ setInterval(() => {
     t: 'sync',
     videoId: currentVideoId,
     time: isLive() ? undefined : player.getCurrentTime(), // 라이브는 시간 보정 안 함
-    playing: player.getPlayerState() === YT.PlayerState.PLAYING,
+    playing: isPlayingIntent(),
     rate: player.getPlaybackRate(),
   };
   if (playlistId) { hb.list = playlistId; hb.index = player.getPlaylistIndex(); }
@@ -535,7 +541,7 @@ function handleMessage(msg, fromConn) {
         suppressUntil = Date.now() + 1200;
         player.setPlaybackRate(msg.rate);
       }
-      const myPlaying = player.getPlayerState() === YT.PlayerState.PLAYING;
+      const myPlaying = isPlayingIntent();
       if (msg.playing !== myPlaying) { applyRemoteState({ time: msg.time, playing: msg.playing }); break; }
       if (msg.playing && Math.abs(player.getCurrentTime() - msg.time) > 1.5) {
         suppressUntil = Date.now() + 1500;
@@ -618,7 +624,7 @@ function createRoom() {
           t: 'sync',
           videoId: currentVideoId,
           time: isLive() ? undefined : player.getCurrentTime(),
-          playing: player.getPlayerState() === YT.PlayerState.PLAYING,
+          playing: isPlayingIntent(),
           rate: player.getPlaybackRate(),
         };
         if (playlistId) { st0.list = playlistId; st0.index = player.getPlaylistIndex(); }
@@ -1470,7 +1476,7 @@ window.addEventListener('pagehide', () => { try { if (peer) peer.destroy(); } ca
 // (테스트/문제해결용) 콘솔에서 현재 상태 확인
 window.__debug = () => ({
   videoId: currentVideoId, isHost, code: roomCode,
-  playing: playerReady && player.getPlayerState() === 1,
+  playing: playerReady && [1, 3].includes(player.getPlayerState()), // 재생+버퍼링
   time: playerReady ? player.getCurrentTime() : 0,
   peers: Number($('peerCount').textContent),
   voiceOn: !!myStream, voiceCalls: Object.keys(voiceCalls).length,
