@@ -321,6 +321,7 @@ function showScreen(name) {
   $('landing').classList.toggle('active', name === 'landing');
   $('room').classList.toggle('active', name === 'room');
   $('playerBox').style.display = name === 'room' ? 'block' : 'none';
+  if (name === 'room') keepAwake(); // 방에 있는 동안 화면 자동 꺼짐 방지
 }
 
 /* ═══════════════ 유튜브 플레이어 ═══════════════ */
@@ -671,6 +672,7 @@ async function startVoice() {
     return;
   }
   ensureVoiceCtx(); // 버튼 탭(사용자 제스처) 시점에 오디오 컨텍스트 잠금 해제 (아이폰 필수)
+  setCallMediaSession(true); // 통화 중임을 OS에 등록 (백그라운드 유지)
   $('btnVoice').textContent = '음성 대화 종료';
   $('btnMute').style.display = '';
   send({ t: 'voice-on', id: myPeerId() });
@@ -688,6 +690,7 @@ function stopVoice() {
   if (myStream) myStream.getTracks().forEach(tr => tr.stop());
   myStream = null;
   micMuted = false;
+  setCallMediaSession(false);
   $('btnVoice').textContent = '음성 대화 시작';
   $('btnMute').style.display = 'none';
   $('btnMute').textContent = '음소거';
@@ -838,6 +841,41 @@ $('btnMute').addEventListener('click', () => {
   myStream.getAudioTracks().forEach(tr => { tr.enabled = !micMuted; });
   $('btnMute').textContent = micMuted ? '음소거 해제' : '음소거';
   toast(micMuted ? '내 마이크를 껐어요 🔇' : '마이크를 다시 켰어요 🎙');
+});
+
+/* ═══════════════ 백그라운드 통화 유지 보강 ═══════════════ */
+// OS에 "미디어/통화 중인 앱"으로 등록 → 화면 꺼짐·앱 전환 시 정리 대상에서 제외되도록
+function setCallMediaSession(on) {
+  if (!('mediaSession' in navigator)) return;
+  try {
+    if (on) {
+      navigator.mediaSession.metadata = new MediaMetadata({ title: '친구와 통화 중', artist: '같이보기 🍿' });
+      navigator.mediaSession.playbackState = 'playing';
+      // OS 미디어 버튼이 통화를 멈추지 않게 무시
+      ['play', 'pause', 'stop'].forEach(a => { try { navigator.mediaSession.setActionHandler(a, () => {}); } catch {} });
+    } else {
+      navigator.mediaSession.playbackState = 'none';
+    }
+  } catch {}
+}
+
+// 방에 있는 동안 화면이 저절로 꺼지지 않게 (통화가 화면 잠금으로 끊기는 것 예방)
+let wakeLock = null;
+async function keepAwake() {
+  try {
+    if ('wakeLock' in navigator && !wakeLock) {
+      wakeLock = await navigator.wakeLock.request('screen');
+      wakeLock.addEventListener('release', () => { wakeLock = null; });
+    }
+  } catch {}
+}
+
+// 앱으로 돌아왔을 때: 화면 유지 재요청 + 통화 오디오 재개
+document.addEventListener('visibilitychange', () => {
+  if (document.visibilityState !== 'visible') return;
+  if ($('room').classList.contains('active')) keepAwake();
+  if (voiceCtx && voiceCtx.state === 'suspended') voiceCtx.resume().catch(() => {});
+  document.querySelectorAll('#voiceAudios audio').forEach(a => a.play().catch(() => {}));
 });
 
 /* ═══════════════ 음량 분리 조절 (영상 / 통화) ═══════════════ */
