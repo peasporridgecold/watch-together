@@ -254,12 +254,12 @@
 /* ═══════════════ 상수 & 상태 ═══════════════ */
 const ID_PREFIX = 'ytwatch-kr-v1-';           // PeerJS 방 ID 접두어 (다른 서비스와 충돌 방지)
 const CODE_CHARS = 'ABCDEFGHJKMNPQRSTUVWXYZ23456789'; // 헷갈리는 글자(I,L,O,0,1) 제외
-// 무료 STUN/TURN 서버 — 모바일 통신망(NAT) 뒤에서도 연결되도록
+// STUN 서버 — 모바일 통신망(NAT) 뒤에서도 서로 찾을 수 있게
+// (이전에 넣었던 openrelay 무료 TURN은 서비스 종료로 죽어서 제거 —
+//  죽은 서버가 있으면 연결 수립이 느려지고 불안정해짐)
 const PEER_CONFIG = { config: { iceServers: [
   { urls: 'stun:stun.l.google.com:19302' },
-  { urls: 'stun:stun1.l.google.com:19302' },
-  { urls: 'turn:openrelay.metered.ca:80',  username: 'openrelayproject', credential: 'openrelayproject' },
-  { urls: 'turn:openrelay.metered.ca:443', username: 'openrelayproject', credential: 'openrelayproject' },
+  { urls: 'stun:stun.cloudflare.com:3478' },
 ]}};
 
 let peer = null;          // 내 PeerJS 객체
@@ -581,41 +581,69 @@ function createRoom() {
 }
 
 /* ── 방 참여하기 (게스트) ── */
+let reconnectTries = 0; // 끊겼을 때 자동 재접속 횟수
+
+function connectHost(first) {
+  hostConn = peer.connect(ID_PREFIX + roomCode.toLowerCase(), { reliable: true });
+
+  const failTimer = setTimeout(() => {
+    if (!hostConn.open) {
+      if (first) { setStatus('연결 실패', 'err'); toast('방을 찾지 못했어요. 코드를 확인해 주세요 🥲'); }
+      else scheduleReconnect();
+    }
+  }, 12000);
+
+  hostConn.on('open', () => {
+    clearTimeout(failTimer);
+    reconnectTries = 0;
+    isHost = false;
+    $('codeDisplay').textContent = roomCode;
+    showScreen('room');
+    setStatus('연결됨', 'on');
+    history.replaceState(null, '', '?room=' + roomCode);
+    toast(first ? '방에 들어왔어요! 🎉' : '다시 연결됐어요! ✨');
+    // 재접속이면 음성 대화 상태도 다시 알림
+    if (!first && myStream) send({ t: 'voice-on', id: myPeerId() });
+  });
+  hostConn.on('data', msg => handleMessage(msg, null));
+  hostConn.on('close', () => {
+    clearTimeout(failTimer);
+    if (peer.destroyed) return; // 내가 나가는 중
+    scheduleReconnect();
+  });
+}
+
+// 잠깐 끊겨도(네트워크 전환, 화면 잠금 등) 알아서 다시 붙기
+function scheduleReconnect() {
+  if (peer.destroyed) return;
+  if (reconnectTries >= 6) {
+    setStatus('연결 끊김', 'err');
+    toast('연결이 끊겼어요. 초대 링크로 다시 들어와 주세요 🥲');
+    return;
+  }
+  reconnectTries++;
+  setStatus('재연결 중… (' + reconnectTries + ')', 'err');
+  setTimeout(() => {
+    if (peer.destroyed) return;
+    if (peer.disconnected) peer.reconnect();
+    connectHost(false);
+  }, Math.min(8000, 1200 * reconnectTries));
+}
+
 function joinRoom(code) {
   roomCode = code.toUpperCase();
   setStatus('참여하는 중…');
   peer = new Peer(PEER_CONFIG);
 
-  peer.on('open', () => {
-    hostConn = peer.connect(ID_PREFIX + roomCode.toLowerCase(), { reliable: true });
-
-    const failTimer = setTimeout(() => {
-      if (!hostConn.open) { setStatus('연결 실패', 'err'); toast('방을 찾지 못했어요. 코드를 확인해 주세요 🥲'); }
-    }, 12000);
-
-    hostConn.on('open', () => {
-      clearTimeout(failTimer);
-      isHost = false;
-      $('codeDisplay').textContent = roomCode;
-      showScreen('room');
-      setStatus('연결됨', 'on');
-      history.replaceState(null, '', '?room=' + roomCode);
-      toast('방에 들어왔어요! 🎉');
-    });
-    hostConn.on('data', msg => handleMessage(msg, null));
-    hostConn.on('close', () => {
-      setStatus('방장 연결 끊김', 'err');
-      toast('방장과 연결이 끊겼어요 🥲');
-    });
-  });
+  peer.on('open', () => connectHost(true));
 
   peer.on('error', err => {
     if (err.type === 'peer-unavailable') {
-      setStatus('방 없음', 'err');
-      toast('그 코드의 방이 없어요. 코드를 다시 확인해 주세요!');
+      if (reconnectTries > 0) scheduleReconnect(); // 재접속 중이면 계속 시도 (방장이 곧 돌아올 수 있음)
+      else { setStatus('방 없음', 'err'); toast('그 코드의 방이 없어요. 코드를 다시 확인해 주세요!'); }
     } else {
       setStatus('연결 오류', 'err');
-      toast('연결에 문제가 생겼어요: ' + err.type);
+      if (reconnectTries === 0) toast('연결에 문제가 생겼어요: ' + err.type);
     }
   });
 
@@ -703,22 +731,37 @@ function attachAudio(id, stream) {
     a.setAttribute('playsinline', '');
     $('voiceAudios').appendChild(a);
   }
-  a.srcObject = stream;
   detachVoiceGain(id);
   try {
-    // 소리는 웹오디오 GainNode를 거쳐 재생 (요소는 무음으로 두되 재생은 유지 —
-    // 아이폰은 요소가 재생 중이어야 WebRTC 오디오가 흐름)
+    // 음량은 GainNode로 조절하되, 최종 출력은 다시 "일반 오디오 요소"로 —
+    // 웹오디오 직접 출력은 데스크톱 크롬에서 에코 제거(AEC) 기준 신호에 안 잡히는
+    // 버그가 있어서, 요소 재생으로 되돌려야 모든 기기에서 에코가 제거됨
     const ctx = ensureVoiceCtx();
     const src = ctx.createMediaStreamSource(stream);
     const gain = ctx.createGain();
     gain.gain.value = voiceVol / 100;
-    src.connect(gain).connect(ctx.destination);
-    voiceGains[id] = { src, gain };
-    a.muted = true;
+    const dest = ctx.createMediaStreamDestination();
+    src.connect(gain).connect(dest);
+    voiceGains[id] = { src, gain, dest };
+    a.muted = false;
+    a.srcObject = dest.stream; // 게인 적용된 소리
+    // 아이폰: 원본 스트림도 (무음) 요소에 붙어 재생 중이어야 웹오디오로 소리가 흘러들어옴
+    let k = document.getElementById('ku-' + id);
+    if (!k) {
+      k = document.createElement('audio');
+      k.id = 'ku-' + id;
+      k.autoplay = true;
+      k.muted = true;
+      k.setAttribute('playsinline', '');
+      $('voiceAudios').appendChild(k);
+    }
+    k.srcObject = stream;
+    k.play().catch(() => {});
   } catch {
     // 웹오디오가 안 되는 환경 → 요소 음량으로 폴백
     a.muted = false;
     a.dataset.fallback = '1';
+    a.srcObject = stream;
     a.volume = Math.min(1, voiceVol / 100);
   }
   // 모바일에서 자동재생이 막히면 탭 한 번으로 풀리게
@@ -840,9 +883,12 @@ function applyVoiceVol() {
 
 function detachVoiceGain(id) {
   const g = voiceGains[id];
-  if (!g) return;
-  try { g.src.disconnect(); g.gain.disconnect(); } catch {}
-  delete voiceGains[id];
+  if (g) {
+    try { g.src.disconnect(); g.gain.disconnect(); if (g.dest) g.dest.disconnect(); } catch {}
+    delete voiceGains[id];
+  }
+  const k = document.getElementById('ku-' + id);
+  if (k) k.remove();
 }
 
 function wireVolSlider(inputId, valId, onChange) {
@@ -1325,7 +1371,7 @@ window.__debug = () => ({
   queue: playQueue ? playQueue.length : 0,
   videoVolume: playerReady && player.getVolume ? player.getVolume() : null,
   voiceVolume: (() => { const g = Object.values(voiceGains)[0]; return g ? g.gain.gain.value : ((document.querySelector('#voiceAudios audio') || {}).volume ?? null); })(),
-  audioLive: [...document.querySelectorAll('#voiceAudios audio')].filter(a => a.srcObject && !a.paused).length,
+  audioLive: [...document.querySelectorAll('#voiceAudios audio')].filter(a => a.srcObject && !a.paused && !a.muted).length,
   play: () => player.playVideo(), pause: () => player.pauseVideo(), seek: t => player.seekTo(t, true),
   // 음성 품질 통계 (지연/지터/손실/끊김보정) — 문제 진단용
   voiceStats: voiceStatsAll,
