@@ -353,7 +353,8 @@ function onPlayerStateChange(e) {
   if (e.data === YT.PlayerState.ENDED) return;
   // 원격 명령을 적용하는 중이면 다시 방송하지 않음 (무한 에코 방지)
   if (Date.now() < suppressUntil) return;
-  const t = player.getCurrentTime();
+  // 라이브면 time 생략 → 받는 쪽은 재생/일시정지만 따라하고 탐색은 안 함
+  const t = isLive() ? undefined : player.getCurrentTime();
   // 재생목록 모드에선 videoId 생략 (곡 전환 직후 서로 어긋나 단일영상 모드로 빠지는 것 방지)
   const vid = playlistId ? undefined : currentVideoId;
   if (e.data === YT.PlayerState.PLAYING) {
@@ -361,6 +362,13 @@ function onPlayerStateChange(e) {
   } else if (e.data === YT.PlayerState.PAUSED) {
     send({ t: 'pause', time: t, videoId: vid });
   }
+}
+
+// 지금 보는 게 라이브 방송인지 (라이브는 방송 자체가 동기화라 시간 보정을 끔 —
+// 사람마다 시간 기준점이 달라서 시간 동기화를 하면 오히려 서로 탐색 루프가 생김)
+function isLive() {
+  try { return playerReady && !!(player.getVideoData() || {}).isLive; }
+  catch { return false; }
 }
 
 // 배속 변경 → 친구도 같은 속도로
@@ -451,7 +459,7 @@ setInterval(() => {
   if (!currentVideoId) return;
   const state = player.getPlayerState();
   const t = player.getCurrentTime();
-  if (state === YT.PlayerState.PAUSED && Math.abs(t - lastPolledTime) > 0.8 && Date.now() >= suppressUntil) {
+  if (state === YT.PlayerState.PAUSED && Math.abs(t - lastPolledTime) > 0.8 && Date.now() >= suppressUntil && !isLive()) {
     send({ t: 'seek', time: t, videoId: playlistId ? undefined : currentVideoId });
   }
   lastPolledTime = t;
@@ -463,7 +471,7 @@ setInterval(() => {
   const hb = {
     t: 'sync',
     videoId: currentVideoId,
-    time: player.getCurrentTime(),
+    time: isLive() ? undefined : player.getCurrentTime(), // 라이브는 시간 보정 안 함
     playing: player.getPlayerState() === YT.PlayerState.PLAYING,
     rate: player.getPlaybackRate(),
   };
@@ -609,7 +617,7 @@ function createRoom() {
         const st0 = {
           t: 'sync',
           videoId: currentVideoId,
-          time: player.getCurrentTime(),
+          time: isLive() ? undefined : player.getCurrentTime(),
           playing: player.getPlayerState() === YT.PlayerState.PLAYING,
           rate: player.getPlaybackRate(),
         };
@@ -1473,6 +1481,7 @@ window.__debug = () => ({
   voiceVolume: (() => { const g = Object.values(voiceGains)[0]; return g ? g.gain.gain.value : ((document.querySelector('#voiceAudios audio') || {}).volume ?? null); })(),
   audioLive: [...document.querySelectorAll('#voiceAudios audio')].filter(a => a.srcObject && !a.paused && !a.muted).length,
   rate: playerReady && player.getPlaybackRate ? player.getPlaybackRate() : null,
+  live: isLive(),
   play: () => player.playVideo(), pause: () => player.pauseVideo(), seek: t => player.seekTo(t, true),
   setRate: r => player.setPlaybackRate(r),
   // 음성 품질 통계 (지연/지터/손실/끊김보정) — 문제 진단용
