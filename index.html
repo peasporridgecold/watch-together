@@ -342,6 +342,7 @@ window.onYouTubeIframeAPIReady = function() {
         if (pendingState) { const st = pendingState; pendingState = null; applyRemoteState(st); }
       },
       onStateChange: onPlayerStateChange,
+      onPlaybackRateChange: onRateChange, // 배속 변경도 친구에게 전파
     },
   });
 };
@@ -367,6 +368,13 @@ function onPlayerStateChange(e) {
   } else if (e.data === YT.PlayerState.PAUSED) {
     send({ t: 'pause', time: t, videoId: currentVideoId });
   }
+}
+
+// 배속 변경 → 친구도 같은 속도로
+function onRateChange(e) {
+  if (!currentVideoId) return;
+  if (Date.now() < suppressUntil) return; // 원격 적용 중이면 에코 방지
+  send({ t: 'rate', rate: e.data });
 }
 
 function loadVideo(id, broadcast) {
@@ -436,6 +444,7 @@ setInterval(() => {
     videoId: currentVideoId,
     time: player.getCurrentTime(),
     playing: player.getPlayerState() === YT.PlayerState.PLAYING,
+    rate: player.getPlaybackRate(),
   });
 }, 3000);
 
@@ -463,9 +472,21 @@ function handleMessage(msg, fromConn) {
     case 'play':  applyRemoteState({ videoId: msg.videoId, time: msg.time, playing: true }); break;
     case 'pause': applyRemoteState({ videoId: msg.videoId, time: msg.time, playing: false }); break;
     case 'seek':  applyRemoteState({ videoId: msg.videoId, time: msg.time }); break;
+    case 'rate': // 친구가 배속을 바꿈 → 나도 같은 속도로
+      if (playerReady && typeof msg.rate === 'number') {
+        suppressUntil = Date.now() + 1200;
+        player.setPlaybackRate(msg.rate);
+        toast('재생 속도 ' + msg.rate + '배속 ⏩');
+      }
+      break;
     case 'sync': { // 방장의 주기적 상태 방송 (게스트만 받음)
       if (isHost || !playerReady) break;
       if (msg.videoId !== currentVideoId) { applyRemoteState({ videoId: msg.videoId, time: msg.time, playing: msg.playing }); break; }
+      // 배속이 다르면 방장 속도로 맞춤
+      if (typeof msg.rate === 'number' && player.getPlaybackRate() !== msg.rate) {
+        suppressUntil = Date.now() + 1200;
+        player.setPlaybackRate(msg.rate);
+      }
       const myPlaying = player.getPlayerState() === YT.PlayerState.PLAYING;
       if (msg.playing !== myPlaying) { applyRemoteState({ time: msg.time, playing: msg.playing }); break; }
       if (msg.playing && Math.abs(player.getCurrentTime() - msg.time) > 1.5) {
@@ -551,6 +572,7 @@ function createRoom() {
           videoId: currentVideoId,
           time: player.getCurrentTime(),
           playing: player.getPlayerState() === YT.PlayerState.PLAYING,
+          rate: player.getPlaybackRate(),
         });
       }
     });
@@ -1411,7 +1433,9 @@ window.__debug = () => ({
   videoVolume: playerReady && player.getVolume ? player.getVolume() : null,
   voiceVolume: (() => { const g = Object.values(voiceGains)[0]; return g ? g.gain.gain.value : ((document.querySelector('#voiceAudios audio') || {}).volume ?? null); })(),
   audioLive: [...document.querySelectorAll('#voiceAudios audio')].filter(a => a.srcObject && !a.paused && !a.muted).length,
+  rate: playerReady && player.getPlaybackRate ? player.getPlaybackRate() : null,
   play: () => player.playVideo(), pause: () => player.pauseVideo(), seek: t => player.seekTo(t, true),
+  setRate: r => player.setPlaybackRate(r),
   // 음성 품질 통계 (지연/지터/손실/끊김보정) — 문제 진단용
   voiceStats: voiceStatsAll,
 });
