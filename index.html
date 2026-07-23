@@ -349,24 +349,17 @@ window.onYouTubeIframeAPIReady = function() {
 
 function onPlayerStateChange(e) {
   if (!currentVideoId) return;
-  // 영상이 끝나면: 재생목록 대기열이 있을 때 방장이 다음 곡으로 (모두에게 전파됨)
-  if (e.data === YT.PlayerState.ENDED) {
-    if (isHost && playQueue) {
-      const i = playQueue.indexOf(currentVideoId);
-      if (i >= 0 && i + 1 < playQueue.length) {
-        toast('다음 영상 재생 ▶');
-        loadVideo(playQueue[i + 1], true);
-      }
-    }
-    return;
-  }
+  // 영상 종료: 재생목록 모드면 플레이어가 알아서 다음 곡으로 넘어감 (0.5초 폴링이 전파)
+  if (e.data === YT.PlayerState.ENDED) return;
   // 원격 명령을 적용하는 중이면 다시 방송하지 않음 (무한 에코 방지)
   if (Date.now() < suppressUntil) return;
   const t = player.getCurrentTime();
+  // 재생목록 모드에선 videoId 생략 (곡 전환 직후 서로 어긋나 단일영상 모드로 빠지는 것 방지)
+  const vid = playlistId ? undefined : currentVideoId;
   if (e.data === YT.PlayerState.PLAYING) {
-    send({ t: 'play', time: t, videoId: currentVideoId });
+    send({ t: 'play', time: t, videoId: vid });
   } else if (e.data === YT.PlayerState.PAUSED) {
-    send({ t: 'pause', time: t, videoId: currentVideoId });
+    send({ t: 'pause', time: t, videoId: vid });
   }
 }
 
@@ -379,6 +372,7 @@ function onRateChange(e) {
 
 function loadVideo(id, broadcast) {
   if (broadcast) send({ t: 'video', id });
+  playlistId = null; // 단일 영상 재생 = 재생목록 모드 종료
   $('playerEmpty').style.display = 'none';
   // 플레이어가 아직 준비 전이면 보관해 뒀다가 onReady에서 적용 (currentVideoId는
   // 여기서 바꾸면 안 됨 — applyRemoteState가 로드를 건너뛰게 됨)
@@ -397,10 +391,26 @@ function applyRemoteState(st) {
   if (!userInteracted && st.playing) { showTapOverlay(st); return; }
 
   suppressUntil = Date.now() + 1800;
-  if (st.videoId && st.videoId !== currentVideoId) {
+  if (st.list) { // 유튜브 재생목록 모드
+    $('playerEmpty').style.display = 'none';
+    if (playlistId !== st.list) {
+      playlistId = st.list;
+      player.loadPlaylist({ list: st.list, listType: 'playlist', index: st.index || 0, startSeconds: st.time || 0 });
+      applyVideoVol();
+      if (st.playing === false) setTimeout(() => { suppressUntil = Date.now() + 1500; player.pauseVideo(); }, 700);
+      return;
+    }
+    if (typeof st.index === 'number' && player.getPlaylistIndex() !== st.index) {
+      player.playVideoAt(st.index);
+      return;
+    }
+    // 같은 목록·같은 곡이면 아래 공통 시간/재생 보정으로 진행
+  } else if (st.videoId && st.videoId !== currentVideoId) {
+    playlistId = null;
     currentVideoId = st.videoId;
     $('playerEmpty').style.display = 'none';
     player.loadVideoById(st.videoId, st.time || 0);
+    applyVideoVol();
     if (!st.playing) setTimeout(() => { suppressUntil = Date.now() + 1500; player.pauseVideo(); }, 700);
     return;
   }
@@ -425,13 +435,24 @@ $('tapOverlay').addEventListener('click', () => {
 // 첫 터치/클릭이 있으면 자동재생 잠금이 풀린 것으로 간주
 document.addEventListener('pointerdown', () => { userInteracted = true; }, { once: true });
 
-/* ── 0.5초마다: 일시정지 중 탐색 감지 ── */
+/* ── 0.5초마다: 재생목록 곡 넘어감 감지 + 일시정지 중 탐색 감지 ── */
 setInterval(() => {
-  if (!playerReady || !currentVideoId) return;
+  if (!playerReady) return;
+  // 재생목록 모드: 곡이 바뀌면(자동 넘어감/다음 버튼/목록에서 선택) 친구에게 알림
+  if (playlistId && player.getVideoData) {
+    const vid = (player.getVideoData() || {}).video_id;
+    if (vid && vid !== currentVideoId) {
+      currentVideoId = vid;
+      if (Date.now() >= suppressUntil) {
+        send({ t: 'plidx', list: playlistId, index: player.getPlaylistIndex(), time: player.getCurrentTime() });
+      }
+    }
+  }
+  if (!currentVideoId) return;
   const state = player.getPlayerState();
   const t = player.getCurrentTime();
   if (state === YT.PlayerState.PAUSED && Math.abs(t - lastPolledTime) > 0.8 && Date.now() >= suppressUntil) {
-    send({ t: 'seek', time: t, videoId: currentVideoId });
+    send({ t: 'seek', time: t, videoId: playlistId ? undefined : currentVideoId });
   }
   lastPolledTime = t;
 }, 500);
@@ -439,13 +460,15 @@ setInterval(() => {
 /* ── 3초마다: 방장이 현재 상태 방송 (늦게 온 사람/미세한 어긋남 보정) ── */
 setInterval(() => {
   if (!isHost || !playerReady || !currentVideoId || guestConns.length === 0) return;
-  send({
+  const hb = {
     t: 'sync',
     videoId: currentVideoId,
     time: player.getCurrentTime(),
     playing: player.getPlayerState() === YT.PlayerState.PLAYING,
     rate: player.getPlaybackRate(),
-  });
+  };
+  if (playlistId) { hb.list = playlistId; hb.index = player.getPlaylistIndex(); }
+  send(hb);
 }, 3000);
 
 /* ═══════════════ 연결 (PeerJS) ═══════════════ */
@@ -479,9 +502,26 @@ function handleMessage(msg, fromConn) {
         toast('재생 속도 ' + msg.rate + '배속 ⏩');
       }
       break;
+    case 'plidx': // 재생목록에서 곡이 넘어감 → 나도 같은 곡으로
+      if (playerReady && playlistId === msg.list && player.getPlaylistIndex() !== msg.index) {
+        suppressUntil = Date.now() + 1800;
+        player.playVideoAt(msg.index);
+      }
+      break;
+    case 'plload': // 친구가 재생목록을 틀음
+      applyRemoteState({ list: msg.list, index: msg.index || 0, time: 0, playing: true });
+      toast('재생목록을 틀었어요 ▶');
+      break;
     case 'sync': { // 방장의 주기적 상태 방송 (게스트만 받음)
       if (isHost || !playerReady) break;
-      if (msg.videoId !== currentVideoId) { applyRemoteState({ videoId: msg.videoId, time: msg.time, playing: msg.playing }); break; }
+      if (msg.list) { // 재생목록 모드 동기화
+        if (playlistId !== msg.list) { applyRemoteState({ list: msg.list, index: msg.index, time: msg.time, playing: msg.playing }); break; }
+        if (typeof msg.index === 'number' && player.getPlaylistIndex() !== msg.index) {
+          suppressUntil = Date.now() + 1800;
+          player.playVideoAt(msg.index);
+          break;
+        }
+      } else if (msg.videoId !== currentVideoId) { applyRemoteState({ videoId: msg.videoId, time: msg.time, playing: msg.playing }); break; }
       // 배속이 다르면 방장 속도로 맞춤
       if (typeof msg.rate === 'number' && player.getPlaybackRate() !== msg.rate) {
         suppressUntil = Date.now() + 1200;
@@ -522,10 +562,9 @@ function handleMessage(msg, fromConn) {
       }
       const clean = (msg.items || []).filter(x => x && /^[\w-]{11}$/.test(x.id)).slice(0, 60);
       if (!clean.length) break;
-      if (msg.kind === 'playlist') playQueue = clean.map(x => x.id); // 나도 대기열 보유 (내가 방장이면 자동 진행)
       listState = { mode: 'remote', next: null, listId: msg.listId };
       renderResults(clean, false);
-      const icon = msg.kind === 'channel' ? '📺 ' : msg.kind === 'playlist' ? '🎬 ' : '🔍 ';
+      const icon = msg.kind === 'channel' ? '📺 ' : '🔍 ';
       prependListHead(icon + msg.label + ' — 친구가 열었어요', [{ text: '닫기', on: closeList }]);
       break;
     }
@@ -567,13 +606,15 @@ function createRoom() {
       updatePeerCount();
       // 새로 들어온 친구에게 현재 상태 알려주기
       if (currentVideoId && playerReady) {
-        conn.send({
+        const st0 = {
           t: 'sync',
           videoId: currentVideoId,
           time: player.getCurrentTime(),
           playing: player.getPlayerState() === YT.PlayerState.PLAYING,
           rate: player.getPlaybackRate(),
-        });
+        };
+        if (playlistId) { st0.list = playlistId; st0.index = player.getPlaylistIndex(); }
+        conn.send(st0);
       }
     });
     conn.on('data', msg => handleMessage(msg, conn));
@@ -1050,7 +1091,6 @@ async function fetchRssFeed(rssUrl) {
 }
 
 const fetchChannelVideos = id => fetchRssFeed('https://www.youtube.com/feeds/videos.xml?channel_id=' + id);
-const fetchPlaylistVideos = plId => fetchRssFeed('https://www.youtube.com/feeds/videos.xml?playlist_id=' + plId);
 
 // 채널의 재생목록 목록 (Piped 채널 탭 API — 이건 봇차단 없이 동작)
 async function fetchChannelPlaylists(id) {
@@ -1073,7 +1113,7 @@ async function fetchChannelPlaylists(id) {
 let listState = null;
 let lastQuery = '';   // 채널에서 "돌아가기" 할 때 재검색용
 let listCounter = 0;
-let playQueue = null; // 재생목록 연속재생 대기열 (영상 id 배열, 방장이 자동 진행)
+let playlistId = null; // 재생 중인 유튜브 재생목록 ID (플레이어 네이티브 재생목록 모드)
 
 function newListId() { return myPeerId() + '-' + (++listCounter); }
 
@@ -1135,21 +1175,18 @@ async function openChannelPlaylists(id, name) {
   send({ t: 'list', kind: 'playlists', label: title, items: r.items, listId: listState.listId });
 }
 
-// 재생목록 열기 — 담긴 영상들 보기 + 연속재생 대기열 설정
-async function openPlaylist(plId, name) {
-  toast('재생목록 여는 중… 🎬');
-  const r = await fetchPlaylistVideos(plId);
-  if (!r) { toast('재생목록을 못 가져왔어요 🥲 (비공개이거나 자동생성 목록일 수 있어요)'); return; }
-  const title = name || r.name || '재생목록';
-  listState = { mode: 'playlist', listId: newListId() };
-  playQueue = r.items.map(x => x.id); // 영상이 끝나면 다음 곡으로
-  renderResults(r.items, false);
-  const btns = [];
-  if (lastChannel) btns.push({ text: '← 채널로', on: () => openChannelPlaylists(lastChannel.id, lastChannel.name) });
-  btns.push({ text: '닫기', on: closeList });
-  prependListHead('🎬 ' + title, btns);
-  send({ t: 'list', kind: 'playlist', label: title, items: r.items, listId: listState.listId });
-  toast('영상을 고르면 이어서 자동 재생돼요 ▶');
+// 재생목록 재생 — 플레이어의 네이티브 재생목록 기능 사용 (전체 곡, 자동 연속재생,
+// 플레이어 안의 ⏭/목록 버튼도 동작하며 그 조작까지 동기화됨)
+function openPlaylist(plId, name) {
+  send({ t: 'plload', list: plId, index: 0 });
+  closeList();
+  $('playerEmpty').style.display = 'none';
+  if (!playerReady) { pendingState = { list: plId, index: 0, time: 0, playing: true }; return; }
+  playlistId = plId;
+  suppressUntil = Date.now() + 2000;
+  player.loadPlaylist({ list: plId, listType: 'playlist', index: 0 });
+  applyVideoVol();
+  toast((name ? '"' + name + '" ' : '') + '재생목록 재생 ▶ 끝나면 자동으로 다음 곡!');
 }
 
 // 재생목록 카드 (썸네일 + 이름 + 영상 수)
@@ -1429,7 +1466,9 @@ window.__debug = () => ({
   time: playerReady ? player.getCurrentTime() : 0,
   peers: Number($('peerCount').textContent),
   voiceOn: !!myStream, voiceCalls: Object.keys(voiceCalls).length,
-  queue: playQueue ? playQueue.length : 0,
+  playlist: playlistId,
+  plIndex: playerReady && player.getPlaylistIndex ? player.getPlaylistIndex() : -1,
+  next: () => player.nextVideo(),
   videoVolume: playerReady && player.getVolume ? player.getVolume() : null,
   voiceVolume: (() => { const g = Object.values(voiceGains)[0]; return g ? g.gain.gain.value : ((document.querySelector('#voiceAudios audio') || {}).volume ?? null); })(),
   audioLive: [...document.querySelectorAll('#voiceAudios audio')].filter(a => a.srcObject && !a.paused && !a.muted).length,
