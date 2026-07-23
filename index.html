@@ -491,7 +491,7 @@ function handleMessage(msg, fromConn) {
       break;
     case 'list': { // 친구가 검색/채널/재생목록을 열음 → 내 화면에도 같은 목록
       if (msg.kind === 'playlists') { // 재생목록 카드 목록
-        const clean = (msg.items || []).filter(p => p && /^[\w-]{10,60}$/.test(p.plId)).slice(0, 40);
+        const clean = (msg.items || []).filter(p => p && /^[\w-]{18,60}$/.test(p.plId)).slice(0, 40);
         if (!clean.length) break;
         listState = { mode: 'remote', next: null, listId: msg.listId };
         renderPlaylistList(clean);
@@ -1002,7 +1002,8 @@ async function fetchChannelPlaylists(id) {
     const items = (d.content || [])
       .filter(i => i.url && i.url.includes('list='))
       .map(i => ({ plId: i.url.split('list=')[1].split('&')[0], name: i.name || '재생목록', count: i.videos, thumb: i.thumbnail || '' }))
-      .filter(p => /^[\w-]{10,60}$/.test(p.plId));
+      // 정상 재생목록 ID는 18자 이상 (가끔 Piped가 ID를 잘라서 주는 경우가 있어 걸러냄)
+      .filter(p => /^[\w-]{18,60}$/.test(p.plId));
     return items.length ? { name: ch.name || '', items } : null;
   } catch { return null; }
 }
