@@ -412,6 +412,7 @@ function applyRemoteState(st) {
       player.loadPlaylist({ list: st.list, listType: 'playlist', index: st.index || 0, startSeconds: st.time || 0 });
       applyVideoVol();
       if (st.playing === false) setTimeout(() => { suppressUntil = Date.now() + 1500; player.pauseVideo(); }, 700);
+      else verifyPlayTook(st);
       return;
     }
     if (typeof st.index === 'number' && player.getPlaylistIndex() !== st.index) {
@@ -426,13 +427,30 @@ function applyRemoteState(st) {
     player.loadVideoById(st.videoId, st.time || 0);
     applyVideoVol();
     if (!st.playing) setTimeout(() => { suppressUntil = Date.now() + 1500; player.pauseVideo(); }, 700);
+    else verifyPlayTook(st);
     return;
   }
   if (typeof st.time === 'number' && Math.abs(player.getCurrentTime() - st.time) > 1.2) {
     player.seekTo(st.time, true);
   }
-  if (st.playing === true) player.playVideo();
+  if (st.playing === true) { player.playVideo(); verifyPlayTook(st); }
   if (st.playing === false) player.pauseVideo();
+}
+
+// 아이폰은 원격 명령으로 온 재생을 자동재생으로 보고 차단하기도 함 →
+// 1.4초 뒤 실제로 재생됐는지 확인하고, 안 됐으면 탭 오버레이로 다시 유도 (자가복구)
+let verifyPlayTimer = null;
+function verifyPlayTook(st) {
+  clearTimeout(verifyPlayTimer);
+  const t0 = player.getCurrentTime();
+  verifyPlayTimer = setTimeout(() => {
+    if (!playerReady) return;
+    const s = player.getPlayerState();
+    const advanced = player.getCurrentTime() - t0 > 0.3;
+    if (s !== YT.PlayerState.PLAYING && s !== YT.PlayerState.BUFFERING && !advanced) {
+      showTapOverlay(st);
+    }
+  }, 1400);
 }
 
 function showTapOverlay(st) {
@@ -599,18 +617,20 @@ function updatePeerCount() {
 }
 
 /* ── 방 만들기 (방장) ── */
-function createRoom() {
-  roomCode = genCode();
-  setStatus('방 여는 중…');
+// fixedCode: 페이지가 새로고침돼도 같은 방 코드를 되찾기 위한 재사용 코드
+function createRoom(fixedCode, attempt) {
+  roomCode = fixedCode || genCode();
+  setStatus(fixedCode ? '방 복구 중…' : '방 여는 중…');
   peer = new Peer(ID_PREFIX + roomCode.toLowerCase(), PEER_CONFIG);
 
   peer.on('open', () => {
     isHost = true;
+    try { sessionStorage.setItem('host-code', roomCode); } catch {}
     $('codeDisplay').textContent = roomCode;
     showScreen('room');
     setStatus('연결됨 · 방장', 'on');
     history.replaceState(null, '', '?room=' + roomCode);
-    toast('방이 만들어졌어요! 친구를 초대해 보세요 💌');
+    toast(fixedCode ? '방을 복구했어요! ✨' : '방이 만들어졌어요! 친구를 초대해 보세요 💌');
   });
 
   peer.on('connection', conn => {
@@ -646,8 +666,13 @@ function createRoom() {
 
   peer.on('error', err => {
     if (err.type === 'unavailable-id') {
-      // 코드가 우연히 겹침 → 새 코드로 재시도
-      peer.destroy(); createRoom();
+      peer.destroy();
+      if (fixedCode && (attempt || 0) < 5) {
+        // 예전 연결 등록이 서버에서 아직 안 지워짐 → 잠시 후 같은 코드로 재시도
+        setTimeout(() => createRoom(fixedCode, (attempt || 0) + 1), 3000);
+      } else {
+        createRoom(); // 새 코드로
+      }
     } else {
       setStatus('연결 오류', 'err');
       toast('연결에 문제가 생겼어요: ' + err.type);
@@ -666,7 +691,7 @@ function connectHost(first) {
 
   const failTimer = setTimeout(() => {
     if (!hostConn.open) {
-      if (first) { setStatus('연결 실패', 'err'); toast('방을 찾지 못했어요. 코드를 확인해 주세요 🥲'); }
+      if (first && reconnectTries === 0) { setStatus('연결 실패', 'err'); toast('방을 찾지 못했어요. 코드를 확인해 주세요 🥲'); }
       else scheduleReconnect();
     }
   }, 12000);
@@ -947,13 +972,42 @@ async function keepAwake() {
   } catch {}
 }
 
-// 앱으로 돌아왔을 때: 화면 유지 재요청 + 통화 오디오 재개
+// 앱으로 돌아왔을 때: 화면 유지 재요청 + 통화 오디오 재개 + 연결/마이크 복구
 document.addEventListener('visibilitychange', () => {
   if (document.visibilityState !== 'visible') return;
   if ($('room').classList.contains('active')) keepAwake();
   if (voiceCtx && voiceCtx.state === 'suspended') voiceCtx.resume().catch(() => {});
   document.querySelectorAll('#voiceAudios audio').forEach(a => a.play().catch(() => {}));
+  // 백그라운드에서 신호 서버 연결이 끊겼으면 재접속
+  if (peer && !peer.destroyed && peer.disconnected) { try { peer.reconnect(); } catch {} }
+  if (!isHost && peer && !peer.destroyed && roomCode && (!hostConn || !hostConn.open) && reconnectTries === 0) {
+    scheduleReconnect();
+  }
+  // 아이폰: 백그라운드에서 iOS가 마이크를 정지시킴 → 돌아오면 자동으로 되살림
+  setTimeout(restoreMicIfDead, 900);
 });
+
+async function restoreMicIfDead() {
+  if (!myStream) return;
+  const tr = myStream.getAudioTracks()[0];
+  if (tr && tr.readyState === 'live' && !tr.muted) return; // 마이크 정상
+  try {
+    const ns = await navigator.mediaDevices.getUserMedia({
+      audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true },
+    });
+    const nt = ns.getAudioTracks()[0];
+    nt.enabled = !micMuted;
+    // 진행 중인 통화들의 보내는 트랙을 새 마이크로 갈아끼움
+    Object.values(voiceCalls).forEach(c => {
+      const pc = c.peerConnection;
+      const sender = pc && pc.getSenders && pc.getSenders().find(s => s.track && s.track.kind === 'audio');
+      if (sender) sender.replaceTrack(nt).catch(() => {});
+    });
+    myStream.getTracks().forEach(t => t.stop());
+    myStream = ns;
+    toast('마이크를 다시 연결했어요 🎙');
+  } catch {}
+}
 
 /* ═══════════════ 음량 분리 조절 (영상 / 통화) ═══════════════ */
 // 폰 볼륨 버튼은 미디어 음량 전체를 움직이므로, 앱 안에서 각각 따로 조절한다.
@@ -971,8 +1025,11 @@ const volumeControllable = (() => {
   catch { return false; }
 })();
 
+let vidMuted = false; // (아이폰용) 영상 소리 끄기 토글 상태
+
 function applyVideoVol() {
   if (!playerReady || !player.setVolume) return;
+  if (vidMuted) { player.mute(); return; } // 사용자가 영상 소리를 꺼둔 상태 유지
   player.setVolume(videoVol);
   if (videoVol > 0 && player.isMuted && player.isMuted()) player.unMute();
 }
@@ -1019,11 +1076,25 @@ $('volVoice').value = voiceVol; $('volVoiceVal').textContent = voiceVol + '%';
 wireVolSlider('volVideo', 'volVideoVal', v => { videoVol = v; localStorage.setItem('vol-video', v); applyVideoVol(); });
 wireVolSlider('volVoice', 'volVoiceVal', v => { voiceVol = v; localStorage.setItem('vol-voice', v); applyVoiceVol(); });
 
-// 아이폰: 영상 음량 조절이 시스템 차원에서 막혀 있음 → 안내 + 통화 증폭으로 대체
+// 아이폰: 영상 음량 세밀 조절이 시스템 차원에서 막혀 있음
+// → 슬라이더 대신 "영상 소리 끄기" 토글 제공 (mute/unMute는 아이폰에서도 동작)
 if (!volumeControllable) {
-  $('volVideo').disabled = true;
-  $('volVideo').style.opacity = '.35';
-  $('volHint').textContent = '아이폰은 영상 음량 조절이 막혀 있어요. 대신 통화 음량을 키우고(최대 200%) 폰 볼륨을 낮추면 통화가 상대적으로 커져요.';
+  $('volVideo').style.display = 'none';
+  $('volVideoVal').style.display = 'none';
+  const btn = document.createElement('button');
+  btn.id = 'btnVidMute';
+  btn.className = 'ghost small';
+  btn.style.flex = '1';
+  btn.textContent = '영상 소리 끄기 🔇';
+  $('volVideo').parentElement.appendChild(btn);
+  btn.addEventListener('click', () => {
+    if (!playerReady) return;
+    vidMuted = !vidMuted;
+    if (vidMuted) player.mute(); else { player.unMute(); player.setVolume(100); }
+    btn.textContent = vidMuted ? '영상 소리 켜기 🔊' : '영상 소리 끄기 🔇';
+    toast(vidMuted ? '영상 소리를 껐어요 (통화는 계속 들려요)' : '영상 소리를 켰어요');
+  });
+  $('volHint').textContent = '아이폰은 영상 음량 세밀 조절이 막혀 있어요. 영상 소리 끄기 + 통화 음량(최대 200%)을 활용해 보세요.';
 }
 
 /* ═══════════════ 유튜브 검색 (키 불필요 공개 API + 폴백) ═══════════════ */
@@ -1405,7 +1476,7 @@ $('videoUrl').addEventListener('input', () => {
 $('videoUrl').addEventListener('blur', () => setTimeout(hideSuggest, 250));
 
 /* ═══════════════ 버튼 & 시작 ═══════════════ */
-$('btnCreate').addEventListener('click', createRoom);
+$('btnCreate').addEventListener('click', () => createRoom());
 
 $('btnJoin').addEventListener('click', () => {
   const code = $('joinCode').value.trim();
@@ -1470,8 +1541,13 @@ $('btnLeave').addEventListener('click', () => {
   location.href = location.pathname; // 깔끔하게 초기화
 });
 
-// 창을 닫거나 나갈 때 연결을 곱게 정리 → 상대방 인원수가 바로 갱신됨
-window.addEventListener('pagehide', () => { try { if (peer) peer.destroy(); } catch {} });
+// 창을 완전히 닫거나 다른 페이지로 갈 때만 연결 정리 (상대방 인원수 즉시 갱신).
+// 주의: e.persisted=true는 "앱 전환/탭 전환으로 잠시 쉬는 것" — 아이폰은 앱만 바꿔도
+// pagehide가 발생하므로, 이때 destroy하면 방이 통째로 끊긴다 (실제로 겪은 버그)
+window.addEventListener('pagehide', e => {
+  if (e.persisted) return;
+  try { if (peer) peer.destroy(); } catch {}
+});
 
 // (테스트/문제해결용) 콘솔에서 현재 상태 확인
 window.__debug = () => ({
@@ -1494,11 +1570,19 @@ window.__debug = () => ({
   voiceStats: voiceStatsAll,
 });
 
-// 링크에 ?room=코드 가 있으면 자동 참여
+// 링크에 ?room=코드 가 있으면 자동 참여.
+// 내가 방장이던 방이면(새로고침/복귀) 참여가 아니라 방을 같은 코드로 복구
 const urlRoom = new URLSearchParams(location.search).get('room');
 if (urlRoom && urlRoom.length === 6) {
-  $('joinCode').value = urlRoom.toUpperCase();
-  joinRoom(urlRoom);
+  let wasHost = false;
+  try { wasHost = sessionStorage.getItem('host-code') === urlRoom.toUpperCase(); } catch {}
+  if (wasHost) {
+    createRoom(urlRoom.toUpperCase());
+  } else {
+    $('joinCode').value = urlRoom.toUpperCase();
+    reconnectTries = 1; // 링크 자동참여는 방장이 잠시 자리 비웠을 수 있으니 몇 번 재시도
+    joinRoom(urlRoom);
+  }
 }
 </script>
 </body>
