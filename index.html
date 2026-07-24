@@ -1538,6 +1538,9 @@ $('btnShare').addEventListener('click', async () => {
 
 $('btnLeave').addEventListener('click', () => {
   if (!confirm('방을 나갈까요?')) return;
+  // 명시적으로 나갈 때는 즉시 연결 정리 (pagehide의 persisted 가드와 무관하게)
+  try { sessionStorage.removeItem('host-code'); } catch {}
+  try { if (peer) peer.destroy(); } catch {}
   location.href = location.pathname; // 깔끔하게 초기화
 });
 
