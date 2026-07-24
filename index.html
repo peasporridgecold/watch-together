@@ -534,13 +534,18 @@ function handleMessage(msg, fromConn) {
         toast('재생 속도 ' + msg.rate + '배속 ⏩');
       }
       break;
-    case 'plidx': // 재생목록에서 곡이 넘어감 → 나도 같은 곡으로
+    case 'plcue': // 친구가 재생목록을 열어 고르는 중 → 나도 같은 목록 보기
+      if (/^[\w-]{10,60}$/.test(msg.list || '')) showPlaylistPicker(msg.list, msg.name || '', true);
+      break;
+    case 'plidx': // 재생목록에서 곡이 넘어감/선택됨 → 나도 같은 곡으로
       if (playerReady && playlistId === msg.list && player.getPlaylistIndex() !== msg.index) {
+        if (listState && listState.mode === 'plpick') closeList(); // 친구가 골랐으면 내 고르기 화면 닫기
         suppressUntil = Date.now() + 1800;
         player.playVideoAt(msg.index);
+        verifyPlayTook({ list: msg.list, index: msg.index, playing: true });
       }
       break;
-    case 'plload': // 친구가 재생목록을 틀음
+    case 'plload': // (구버전 호환) 친구가 재생목록을 틀음
       applyRemoteState({ list: msg.list, index: msg.index || 0, time: 0, playing: true });
       toast('재생목록을 틀었어요 ▶');
       break;
@@ -1260,18 +1265,85 @@ async function openChannelPlaylists(id, name) {
   send({ t: 'list', kind: 'playlists', label: title, items: r.items, listId: listState.listId });
 }
 
-// 재생목록 재생 — 플레이어의 네이티브 재생목록 기능 사용 (전체 곡, 자동 연속재생,
-// 플레이어 안의 ⏭/목록 버튼도 동작하며 그 조작까지 동기화됨)
+// 재생목록 열기 — 바로 재생하지 않고 담긴 영상 목록을 먼저 보여줌 (친구 화면에도 공유).
+// 플레이어에 '장전(cue)'만 해서 전체 영상 ID를 뽑고, 고르면 그 곡부터 연속재생
 function openPlaylist(plId, name) {
-  send({ t: 'plload', list: plId, index: 0 });
+  send({ t: 'plcue', list: plId, name: name || '' });
+  showPlaylistPicker(plId, name, false);
+}
+
+function showPlaylistPicker(plId, name, fromRemote) {
   closeList();
-  $('playerEmpty').style.display = 'none';
-  if (!playerReady) { pendingState = { list: plId, index: 0, time: 0, playing: true }; return; }
+  if (!playerReady) { setTimeout(() => showPlaylistPicker(plId, name, fromRemote), 600); return; }
   playlistId = plId;
   suppressUntil = Date.now() + 2000;
-  player.loadPlaylist({ list: plId, listType: 'playlist', index: 0 });
-  applyVideoVol();
-  toast((name ? '"' + name + '" ' : '') + '재생목록 재생 ▶ 끝나면 자동으로 다음 곡!');
+  $('playerEmpty').style.display = 'none';
+  player.cuePlaylist({ list: plId, listType: 'playlist', index: 0 }); // cue = 재생 없이 장전
+  toast('재생목록 여는 중… 🎬');
+  let tries = 0;
+  const timer = setInterval(() => {
+    const ids = playerReady && player.getPlaylist ? player.getPlaylist() : null;
+    if (ids && ids.length) {
+      clearInterval(timer);
+      renderPlaylistVideos(plId, ids, name, fromRemote);
+    } else if (++tries > 25) {
+      clearInterval(timer);
+      toast('재생목록을 못 불러왔어요 🥲 (비공개 목록일 수 있어요)');
+    }
+  }, 400);
+}
+
+// 영상 ID 목록 → 고르기 화면 (제목·채널명은 백그라운드에서 가능한 것만 채움)
+function renderPlaylistVideos(plId, ids, name, fromRemote) {
+  const MAX = 60;
+  listState = { mode: 'plpick', next: null, listId: newListId() };
+  const box = $('searchResults');
+  box.innerHTML = '';
+  ids.slice(0, MAX).forEach((vid, i) => {
+    const row = makeResultCard({
+      id: vid, title: (i + 1) + '번째 영상', channel: '', views: null, ts: null, channelId: null,
+      onPick: () => pickFromPlaylist(plId, i),
+    });
+    row.dataset.vid = vid;
+    box.appendChild(row);
+  });
+  if (ids.length > MAX) {
+    const more = document.createElement('div');
+    more.className = 'hint';
+    more.textContent = '… 외 ' + (ids.length - MAX) + '개 — 재생을 시작하면 플레이어 안의 목록 버튼으로 전부 볼 수 있어요';
+    box.appendChild(more);
+  }
+  box.style.display = 'flex';
+  prependListHead('🎬 ' + (name || '재생목록') + (fromRemote ? ' — 친구가 열었어요' : ' — 골라서 재생'), [
+    { text: '▶ 처음부터', on: () => pickFromPlaylist(plId, 0) },
+    { text: '닫기', on: closeList },
+  ]);
+  fillTitles(box, ids.slice(0, Math.min(MAX, 40)));
+}
+
+// 고른 영상부터 재생 (친구도 같은 곡으로) — 이후엔 자동으로 다음 곡
+function pickFromPlaylist(plId, index) {
+  closeList();
+  suppressUntil = Date.now() + 1500;
+  player.playVideoAt(index);
+  send({ t: 'plidx', list: plId, index });
+  toast('재생 시작 ▶ 끝나면 자동으로 다음 영상!');
+}
+
+// 영상 제목/채널명을 5개씩 배경에서 채움 (noembed 공개 API, 실패해도 썸네일로 충분)
+async function fillTitles(box, ids) {
+  for (let i = 0; i < ids.length; i += 5) {
+    if (!box.querySelector('[data-vid]')) return; // 목록이 닫히면 중단
+    await Promise.all(ids.slice(i, i + 5).map(async vid => {
+      try {
+        const d = await fetchJson('https://noembed.com/embed?url=' + encodeURIComponent('https://www.youtube.com/watch?v=' + vid), 6000);
+        const t = box.querySelector('[data-vid="' + vid + '"] .t');
+        if (t && d.title) t.textContent = d.title;
+        const m = box.querySelector('[data-vid="' + vid + '"] .meta');
+        if (m && d.author_name) m.textContent = d.author_name;
+      } catch {}
+    }));
+  }
 }
 
 // 재생목록 카드 (썸네일 + 이름 + 영상 수)
@@ -1396,6 +1468,7 @@ function makeResultCard(r) {
     $('searchResults').style.display = 'none';
     $('searchResults').innerHTML = '';
     $('videoUrl').value = '';
+    if (r.onPick) { r.onPick(); return; } // 재생목록 고르기 등 커스텀 동작
     loadVideo(r.id, true);
     toast('영상을 틀었어요 🎬');
   });
